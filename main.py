@@ -1,6 +1,7 @@
 from db_manager import DB_Manager, Garment
 from color_utils import css_to_rgb, rgb_to_cielab, css_to_hex
 import sys
+from outfit_engine import OutfitGenerator
 
 db = DB_Manager()
 
@@ -41,6 +42,43 @@ def garment_details(garment):
     print(f"Occasion Tags: {garment['occasion_tags']}")
     print(f"Active: {garment['active']}")
 
+def generate_and_display_outfit(db: DB_Manager):
+    """Genera e mostra outfit suggerito"""
+    # Fetch garment
+    shoes_list = db.get_garments_by_category('shoes')
+    bottoms_list = db.get_garments_by_category('trousers')
+    base_tops_list = db.get_garments_by_layer('base')
+    
+    # Validazione
+    if not shoes_list or not bottoms_list or not base_tops_list:
+        print("Wardrobe insufficiente (servono almeno: scarpe, pantaloni, base top)")
+        return
+    
+    mid_tops_list = db.get_garments_by_layer('mid')
+    outerwear_list = db.get_garments_by_layer('outer')
+    
+    # Genera
+    outfits = OutfitGenerator.generate(
+        shoes_list, bottoms_list, base_tops_list,
+        mid_tops_list, outerwear_list, db, count=1
+    )
+    
+    # Display
+    if outfits:
+        outfit = outfits[0]
+        print("\n=== OUTFIT PER OGGI ===")
+        print(f"Score: {outfit.score:.2f}/1.0")
+        print(f"👟 {db.get_garment(outfit.shoes)['name']}")
+        print(f"👖 {db.get_garment(outfit.bottom)['name']}")
+        print(f"👕 {db.get_garment(outfit.base_top)['name']}")
+        if outfit.mid_top:
+            print(f"🧥 {db.get_garment(outfit.mid_top)['name']}")
+        if outfit.outerwear:
+            print(f"🧥 {db.get_garment(outfit.outerwear)['name']}")
+        print("=======================\n")
+    else:
+        print("Nessun outfit valido trovato!")
+
 print("Buongiorno Michele!")
 print("Cosa vuoi fare?")
 print("a -> Aggiungere nuovo capo")
@@ -80,6 +118,18 @@ while True:
         elif option == "r":
             garment_id = int(input("Inserisci id: "))
             db.delete_garment(garment_id)
+        # Funzionalità fantasma, l'utente NON ne è a conoscenza
+        elif option == 'm':
+            garment_id = int(input("Inserisci id: "))
+            field_name = input("Inserisci field_name: ")
+            new_value = input("Inserisci il nuovo valore: ")
+            edit = db.update_garment_field(garment_id, field_name, new_value)
+            if edit:
+                print("Elemento aggiornato con successo!")
+            else:
+                print("Id non valido")
+        elif option == 'g':
+            generate_and_display_outfit(db)
     except KeyboardInterrupt:
         print("Exiting...")
         db.close()

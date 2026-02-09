@@ -95,6 +95,29 @@ class DB_Manager():
         cursor.execute("SELECT * FROM garment WHERE id = ?", (garment_id,))
         return cursor.fetchone()
     
+    def update_garment_field(self, garment_id: int, field_name: str, new_value):
+        cursor = self.conn.cursor()
+        query = f"UPDATE garment SET {field_name} = ? WHERE id = ?"
+        cursor.execute(query, (new_value, garment_id))
+        self.conn.commit()
+        return cursor.rowcount
+
+    def get_garments_by_category(self, category: str, active_only: bool = True) -> list:
+        cursor = self.conn.cursor()
+        query = "SELECT * FROM garment WHERE category = ?"
+        if active_only:
+            query += "AND active = 1"
+        cursor.execute(query, (category,))
+        return cursor.fetchall()
+
+    def get_garments_by_layer(self, layer_role: str, active_only: bool = True) -> list:
+        cursor = self.conn.cursor()
+        query = "SELECT * FROM garment WHERE layer_role = ?"
+        if active_only:
+            query += "AND active = 1"
+        cursor.execute(query, (layer_role,))
+        return cursor.fetchall()
+    
     def close(self):
         """Close connection when finished"""
         if self.conn:
