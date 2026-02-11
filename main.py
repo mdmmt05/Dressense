@@ -76,6 +76,9 @@ def generate_and_display_outfit(db: DB_Manager):
         if outfit.outerwear:
             print(f"🧥 {db.get_garment(outfit.outerwear)['name']}")
         print("=======================\n")
+        print(f"\n=== DEBUG SCORE ===")
+        OutfitGenerator.debug_score_breakdown(outfit, db)
+        print("===================\n")
     else:
         print("Nessun outfit valido trovato!")
 
