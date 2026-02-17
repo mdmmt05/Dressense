@@ -1,6 +1,7 @@
 import sqlite3
 from pathlib import Path
 from dataclasses import dataclass
+from enum import Enum
 
 db_path = Path('data/wardrobe.db')
 db_path.parent.mkdir(exist_ok=True) # Crea la cartella data se non esiste
@@ -20,6 +21,18 @@ class Garment:
     season_tags: str
     occasion_tags: str
     active: bool
+
+@dataclass
+class FeedbackReason(Enum):
+    COLORS_CLASH = 'colors_clash'
+    TOO_MANY_NEUTRALS = 'too_many_neutrals'
+    TOO_FORMAL = 'too_formal'
+    TOO_CASUAL = 'too_casual'
+    BAD_LAYERING = 'bad_layering'
+    DONT_LIKE_ITEM = 'dont_like_item'
+    DONT_LIKE_COMBINATION = 'dont_like_combination'
+    BORING = 'boring'
+    TOO_FLASHY = 'too_flashy'
 
 class DB_Manager():
     def __init__(self):
@@ -47,6 +60,27 @@ class DB_Manager():
                 occasion_tags TEXT NOT NULL,
                 active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1))
             )               
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                outfit_signature TEXT NOT NULL,
+                shoes_id INTEGER NOT NULL,
+                bottom_id INTEGER NOT NULL,
+                base_top_id INTEGER NOT NULL,
+                mid_top_id INTEGER,
+                outerwear_id INTEGER,
+                verdict INTEGER NOT NULL CHECK(verdict IN (0, 1)),
+                reason TEXT CHECK(reason IN ('colors_clash', 'too_many_neutrals', 'too_formal', 
+                                               'too_casual', 'bad_layering', 'dont_like_item', 
+                                               'dont_like_combination', 'boring', 'too_flashy')),
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (shoes_id) REFERENCES garment(id),
+                FOREIGN KEY (bottom_id) REFERENCES garment(id),
+                FOREIGN KEY (base_top_id) REFERENCES garment(id),
+                FOREIGN KEY (mid_top_id) REFERENCES garment(id),
+                FOREIGN KEY (outerwear_id) REFERENCES garment(id)
+            )
         ''')
         self.conn.commit()
 
@@ -118,6 +152,67 @@ class DB_Manager():
         cursor.execute(query, (layer_role,))
         return cursor.fetchall()
     
+    def add_feedback(self, shoes_id, bottom_id, base_top_id, mid_top_id, outerwear_id, verdict, reason=None):
+        """
+        Aggiunge un feedback per un outfit
+
+        Args:
+            verdict: 1 per like, 0 per dislike
+            reason: FeedbackReason enum value (opzionale se verdict=1)
+        """
+        # 1. Genera outfit signature
+        outfit_signature = f"{shoes_id}-{bottom_id}-{base_top_id}-{mid_top_id or 0}-{outerwear_id or 0}"
+        if verdict == 1 and reason is not None:
+            #print("Non ci può essere una ragione, se l'outfit ti è piaciuto")
+            raise ValueError("Non ci può essere una ragione se l'outfit ti è piaciuto")
+        if verdict == 0 and reason is None:
+            #print("Se un outfit non ti è piaciuto, devi inserire una ragione")
+            raise ValueError("Se un outfit non ti è piaciuto, devi inserire una ragione")
+        if reason is not None:
+            valid_reasons = [r.value for r in FeedbackReason]
+            if reason not in valid_reasons:
+                raise ValueError(f"Ragione non valida. Valori accettati: {valid_reasons}")
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                INSERT INTO feedback (outfit_signature, shoes_id, bottom_id, base_top_id, mid_top_id, outerwear_id, verdict, reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (outfit_signature, shoes_id, bottom_id, base_top_id, mid_top_id, outerwear_id, verdict, reason))
+            self.conn.commit()
+            feedback_id = cursor.lastrowid
+            return feedback_id
+        except sqlite3.IntegrityError as e:
+            print(f"Errore inserimento feedback: {e}")
+            raise
+    
+    #def get_feedback_by_outfit(self, outfit_signature):
+    #    cursor = self.conn.cursor()
+    #    cursor.execute('''
+    #        SELECT * FROM feedback WHERE outfit_signature = ?
+    #    ''', (outfit_signature,))
+    #    return cursor.fetchall()
+
+    def list_all_feedback(self, limit=None):
+        """
+        Lista tutti i feedback, ordinati dal più recente
+
+        Args:
+            limit: numero massimo di risultati (None = tutti)
+        """
+        cursor = self.conn.cursor()
+        query = "SELECT * FROM feedback ORDER BY timestamp DESC"
+        if limit:
+            query += f" LIMIT {limit}"
+        cursor.execute(query)
+        return cursor.fetchall()
+    
+    def delete_feedback(self, feedback_id: int):
+        """Elimina un feedback specifico"""
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM feedback WHERE id = ?", (feedback_id,))
+        self.conn.commit()
+        return cursor.rowcount  # Restituisce 1 se cancellato, 0 se non trovato
+
     def close(self):
         """Close connection when finished"""
         if self.conn:
