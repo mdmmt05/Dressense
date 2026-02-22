@@ -1,9 +1,14 @@
-from db_manager import DB_Manager, Garment, FeedbackReason
+from db_manager import DB_Manager, Garment, FeedbackReason, WeightsManager
 from color_utils import css_to_rgb, rgb_to_cielab, css_to_hex
 import sys
 from outfit_engine import OutfitGenerator
+from feedback_engine import FeedbackManager
 
 db = DB_Manager()
+weights_manager = WeightsManager(db)
+feedback_manager = FeedbackManager(db)
+
+OutfitGenerator.load_weights(weights_manager.get_all_weights())
 
 current_outfit = None
 
@@ -82,40 +87,35 @@ def generate_and_display_outfit(db: DB_Manager):
         #print(f"\n=== DEBUG SCORE ===")
         #OutfitGenerator.debug_score_breakdown(outfit, db)
         #print("===================\n")
+
+        try:
+            verdict_input = input("Ti è piaciuto l'outfit? [s/n/skip]: ").lower()
+
+            if verdict_input == 'skip':
+                print("⏭️  Rating saltato\n")
+                return outfit
+            
+            verdict = 1 if verdict_input == 's' else 0
+
+            reason = None
+            if verdict == 0:
+                reasons = [r.value for r in FeedbackReason]
+                for i, r in enumerate(reasons, 1):
+                    print(f"{i}. {r}")
+                
+                choice = int(input("Scegli il motivo [1-8]: "))
+                if not 1 <= choice <= len(reasons):
+                    raise ValueError("Scelta non valida")
+                reason = reasons[choice - 1]
+
+            feedback_manager.process_feedback(outfit, verdict, reason)
+        except (KeyboardInterrupt, EOFError):
+            print("\n⏭️  Rating saltato\n")
+        
         return outfit
     else:
         print("Nessun outfit valido trovato!")
         return None
-
-def rate_current_outfit(db: DB_Manager, outfit):
-    if outfit is None:
-        print("Nessun outfit generato in questa sessione. Usa 'g' prima.")
-        return
-    
-    verdict_input = input("Ti è piaciuto l'outfit? [s/n]: ").lower()
-    verdict = 1 if verdict_input == 's' else 0
-
-    reason = None
-    if verdict == 0:
-        reasons = [r.value for r in FeedbackReason]
-        for i, r in enumerate(reasons, 1):
-            print(f"{i}. {r}")
-        
-        choice = int(input("Scegli il motivo [1-9]: "))
-        if not 1 <= choice <= len(reasons):
-            raise ValueError("Scelta non valida")
-        reason = reasons[choice - 1]
-    
-    db.add_feedback(
-        shoes_id=outfit.shoes,
-        bottom_id=outfit.bottom,
-        base_top_id=outfit.base_top,
-        mid_top_id=outfit.mid_top,
-        outerwear_id=outfit.outerwear,
-        verdict=verdict,
-        reason=reason
-    )
-    print("Feedback registrato!")
 
 print("Buongiorno Michele!")
 print("Cosa vuoi fare?")
@@ -156,8 +156,6 @@ while True:
         elif option == "r":
             garment_id = int(input("Inserisci id: "))
             db.delete_garment(garment_id)
-        elif option == "rate":
-            rate_current_outfit(db, current_outfit)
         # Funzionalità fantasma, l'utente NON ne è a conoscenza
         elif option == 'm':
             garment_id = int(input("Inserisci id: "))

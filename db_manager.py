@@ -29,7 +29,6 @@ class FeedbackReason(Enum):
     TOO_FORMAL = 'too_formal'
     TOO_CASUAL = 'too_casual'
     BAD_LAYERING = 'bad_layering'
-    DONT_LIKE_ITEM = 'dont_like_item'
     DONT_LIKE_COMBINATION = 'dont_like_combination'
     BORING = 'boring'
     TOO_FLASHY = 'too_flashy'
@@ -39,6 +38,7 @@ class DB_Manager():
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
         self._initialize_tables()
+        self._initialize_defaults()
 
     def _initialize_tables(self):
         # Verifichiamo che la tabella 'garments' esista già
@@ -72,7 +72,7 @@ class DB_Manager():
                 outerwear_id INTEGER,
                 verdict INTEGER NOT NULL CHECK(verdict IN (0, 1)),
                 reason TEXT CHECK(reason IN ('colors_clash', 'too_many_neutrals', 'too_formal', 
-                                               'too_casual', 'bad_layering', 'dont_like_item', 
+                                               'too_casual', 'bad_layering', 
                                                'dont_like_combination', 'boring', 'too_flashy')),
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (shoes_id) REFERENCES garment(id),
@@ -82,8 +82,58 @@ class DB_Manager():
                 FOREIGN KEY (outerwear_id) REFERENCES garment(id)
             )
         ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS weights (
+                key TEXT PRIMARY KEY,
+                value REAL NOT NULL,
+                default_value REAL NOT NULL,
+                min_value REAL NOT NULL,
+                max_value REAL NOT NULL,
+                last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS item_penalties (
+                garment_id INTEGER PRIMARY KEY,
+                penalty_score REAL NOT NULL DEFAULT 0.0,
+                last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (garment_id) REFERENCES garment(id)
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS pair_penalties (
+                garment_id_1 INTEGER NOT NULL,
+                garment_id_2 INTEGER NOT NULL,
+                penalty_score REAL NOT NULL DEFAULT 0.0,
+                last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (garment_id_1, garment_id_2),
+                FOREIGN KEY (garment_id_1) REFERENCES garment(id),
+                FOREIGN KEY (garment_id_2) REFERENCES garment(id),
+                CHECK (garment_id_1 < garment_id_2)
+            )
+        ''')
         self.conn.commit()
 
+    def _initialize_defaults(self):
+        '''Popola i pesi di default se la tabella è vuota'''
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM weights")
+        count = cursor.fetchone()[0]
+
+        if count == 0:
+            defaults = [
+                ('formality_threshold', 4, 4, 2, 8),
+                ('neutral_saturation_threshold', 20, 20, 10, 40),
+                ('color_weight', 0.55, 0.55, 0.1, 0.9),
+                ('pattern_weight', 0.3, 0.3, 0.05, 0.7),
+                ('formality_weight', 0.15, 0.15, 0.05, 0.5),
+            ]
+            cursor.executemany('''
+                INSERT INTO weights (key, value, default_value, min_value, max_value)
+                VALUES (?, ?, ?, ?, ?)
+            ''', defaults)
+            self.conn.commit()
+    
     def add_garment(self, garment: Garment):
         try:
             cursor = self.conn.cursor()
@@ -217,3 +267,115 @@ class DB_Manager():
         """Close connection when finished"""
         if self.conn:
             self.conn.close()
+
+class WeightsManager:
+    def __init__(self, db_manager: DB_Manager):
+        self.db = db_manager
+        self.conn = db_manager.conn
+    
+    def get_weight(self, key: str) -> float:
+        '''Recupera un peso dal database'''
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT value FROM weights WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        if row is None:
+            raise KeyError(f"Weight '{key}' non trovato nel database")
+        return row['value']
+    
+    def get_all_weights(self) -> dict:
+        '''Restituisce tutti i pesi come dizionario'''
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT key, value FROM weights")
+        return {row['key']: row['value'] for row in cursor.fetchall()}
+    
+    def set_weight(self, key: str, value: float):
+        """Aggiorna un peso con validazione min/max"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT min_value, max_value FROM weights WHERE key = ?",
+            (key,)
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise KeyError(f"Weight '{key}' non trovato")
+        
+        min_val, max_val = row['min_value'], row['max_value']
+        if value < min_val or value > max_val:
+            print(f"Valore {value} fuori range. Uso valori di clamping.")
+        clamped_value = max(min_val, min(max_val, value))
+
+        cursor.execute(
+            "UPDATE weights SET value = ?, last_modified = CURRENT_TIMESTAMP WHERE key = ?",
+            (clamped_value, key)
+        )
+        self.conn.commit()
+        return clamped_value
+    
+    def adjust_weight(self, key: str, delta: float):
+        """Modifica incrementalmente un peso"""
+        current = self.get_weight(key)
+        new_value = current + delta
+        return self.set_weight(key, new_value)
+    
+    def reset_weight(self, key: str):
+        """Resetta un peso al valore di default"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "UPDATE weights SET value = default_value, last_modified = CURRENT_TIMESTAMP WHERE key = ?",
+            (key,)
+        )
+        self.conn.commit()
+        return cursor.rowcount
+    
+    def reset_all_weights(self):
+        """Resetta tutti i pesi ai valori di default"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "UPDATE weights SET value = default_value, last_modified = CURRENT_TIMESTAMP"
+        )
+        self.conn.commit()
+        return cursor.rowcount
+    
+    def get_item_penalty(self, garment_id: int) -> float:
+        """Recupera la penalità di un item (0.0 se non esiste)"""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT penalty_score FROM item_penalties WHERE garment_id = ?", (garment_id,))
+        row = cursor.fetchone()
+        return row['penalty_score'] if row else 0.0
+    
+    def add_item_penalty(self, garment_id: int, penalty_delta: float):
+        """Aggiunge/aggiorna penalità per un item"""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT INTO item_penalties (garment_id, penalty_score, last_updated)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(garment_id) DO UPDATE SET
+                penalty_score = penalty_score + ?,
+                last_updated = CURRENT_TIMESTAMP
+        ''', (garment_id, penalty_delta, penalty_delta))
+        self.conn.commit()
+
+    def get_pair_penalty(self, garment_id_1: int, garment_id_2: int) -> float:
+        """Recupera penalità di una coppia (0.0 se non esiste)"""
+        # Ordina gli ID per garantire consistenza
+        id1, id2 = min (garment_id_1, garment_id_2), max(garment_id_1, garment_id_2)
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT penalty_score FROM pair_penalties WHERE garment_id_1 = ? AND garment_id_2 = ?",
+            (id1, id2)
+        )
+        row = cursor.fetchone()
+        return row['penalty_score'] if row else 0.0
+    
+    def add_pair_penalty(self, garment_id_1: int, garment_id_2: int, penalty_delta: float):
+        """Aggiunge/aggiorna penalità per una coppia"""
+        id1, id2 = min(garment_id_1, garment_id_2), max(garment_id_1, garment_id_2)
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT INTO pair_penalties (garment_id_1, garment_id_2, penalty_score, last_updated)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(garment_id_1, garment_id_2) DO UPDATE SET
+                penalty_score = penalty_score + ?,
+                last_updated = CURRENT_TIMESTAMP
+        ''', (id1, id2, penalty_delta, penalty_delta))
+        self.conn.commit()

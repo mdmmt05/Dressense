@@ -22,9 +22,9 @@ OUTERWEAR_TO_BASE_TOP_MULTIPLIER = 0.3
 OUTERWEAR_TO_MID_TOP_MULTIPLIER = 0.3
 OUTERWEAR_TO_BOTTOM_MULTIPLIER_CASE4 = 0.3
 
-COLOR_WEIGHT = 0.55
-PATTERN_WEIGHT = 0.3
-FORMALITY_WEIGHT = 0.15
+#COLOR_WEIGHT = 0.55
+#PATTERN_WEIGHT = 0.3
+#FORMALITY_WEIGHT = 0.15
 
 @dataclass
 class Outfit:
@@ -38,6 +38,19 @@ class Outfit:
     # Metodi della classe
 
 class OutfitGenerator:
+    weights = {
+        'formality_threshold': 4,
+        'neutral_saturation_threshold': 20,
+        'color_weight': 0.55,
+        'pattern_weight': 0.3,
+        'formality_weight': 0.15,
+    }
+
+    @classmethod
+    def load_weights(cls, weights_dict: dict):
+        """Carica i pesi dal database"""
+        cls.weights.update(weights_dict)
+    
     @staticmethod
     def extract_lab(garment) -> tuple:
         """Estrae la tupla LAB da garment"""
@@ -278,6 +291,9 @@ class OutfitGenerator:
     
     @staticmethod
     def score_calculator(outfit, db) -> float:
+        color_weight = OutfitGenerator.weights['color_weight']
+        pattern_weight = OutfitGenerator.weights['pattern_weight']
+        formality_weight = OutfitGenerator.weights['formality_weight']
         # Caso 1: shoes + bottom + base_top
         if outfit.mid_top is None and outfit.outerwear is None:
             shoes = db.get_garment(outfit.shoes)
@@ -380,7 +396,7 @@ class OutfitGenerator:
             color_score = (score_mid_top_to_bottom*MID_TOP_TO_BOTTOM_MULTIPLIER + score_mid_top_to_shoes*MID_TOP_TO_SHOES_MULTIPLIER + score_mid_top_to_base_top*MID_TOP_TO_BASE_TOP_MULTIPLIER + score_outerwear_to_bottom*OUTERWEAR_TO_BOTTOM_MULTIPLIER_CASE4 + score_outerwear_to_shoes*OUTERWEAR_TO_SHOES_MULTIPLIER + score_outerwear_to_mid_top*OUTERWEAR_TO_MID_TOP_MULTIPLIER)/(MID_TOP_TO_BOTTOM_MULTIPLIER + MID_TOP_TO_SHOES_MULTIPLIER + MID_TOP_TO_BASE_TOP_MULTIPLIER + OUTERWEAR_TO_BOTTOM_MULTIPLIER_CASE4 + OUTERWEAR_TO_SHOES_MULTIPLIER + OUTERWEAR_TO_MID_TOP_MULTIPLIER)
         pattern_score = OutfitGenerator.calculate_pattern_coherence(outfit, db)
         formality_score = OutfitGenerator.calculate_formality_alignment(outfit, db)
-        total_score = color_score*COLOR_WEIGHT + pattern_score*PATTERN_WEIGHT + formality_score*FORMALITY_WEIGHT
+        total_score = color_score*color_weight + pattern_score*pattern_weight + formality_score*formality_weight
         neutral_penalty = OutfitGenerator.calculate_neutral_penalty(outfit, db)
         color_bonus = OutfitGenerator.calculate_color_diversity_bonus(outfit, db)
         simplicity_bonus = OutfitGenerator.calculate_simplicity_bonus(outfit)
