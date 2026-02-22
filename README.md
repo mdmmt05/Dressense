@@ -124,9 +124,3 @@ Dressense is under active development. Here's where we're headed:
 ## 🤝 Contributing
 
 Contributions are welcome! Feel free to open issues or submit pull requests. Since the project is still in active early development, it's a good idea to open an issue first to discuss what you'd like to change.
-
----
-
-## 📄 License
-
-This project is licensed under the MIT License. See [`LICENSE`](LICENSE) for details.
