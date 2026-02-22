@@ -38,7 +38,7 @@ At some point, I got tired of that dependency. So I did what any self-respecting
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/your-username/dressense.git
+git clone https://github.com/mdmmt05/dressense.git
 cd dressense
 ```
 
