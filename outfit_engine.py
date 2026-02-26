@@ -1,9 +1,9 @@
 from dataclasses import dataclass
 from typing import Optional
-from itertools import product
+from itertools import product, combinations
 import random
 import math
-from db_manager import DB_Manager
+from db_manager import DB_Manager, WeightsManager
 
 FORMALITY_THRESHOLD = 4
 NEUTRAL_SATURATION_THRESHOLD = 20
@@ -288,6 +288,31 @@ class OutfitGenerator:
             return 0.01 # completo
         else:
             return 0.0
+        
+    @staticmethod
+    def calculate_pair_penalties(outfit, db) -> float:
+        """Calcola la somma delle penalità per tutte le coppie nell'outfit"""
+        weights_mgr = WeightsManager(db)
+
+        # Raccogli tutti i garment_id
+        garment_ids = [outfit.shoes, outfit.bottom, outfit.base_top]
+        if outfit.mid_top:
+            garment_ids.append(outfit.mid_top)
+        if outfit.outerwear:
+            garment_ids.append(outfit.outerwear)
+        
+        # Calcola penalità totale
+        total_penalty = 0.0
+        for id1, id2 in combinations(garment_ids, 2):
+            penalty = weights_mgr.get_pair_penalty(id1, id2)
+            total_penalty += penalty
+        
+        return total_penalty
+    
+    @staticmethod
+    def calculate_recently_worn_penalty(outfit, db) -> float:
+        """Calcola penalità per capi indossati di recente"""
+        pass
     
     @staticmethod
     def score_calculator(outfit, db) -> float:
@@ -394,13 +419,18 @@ class OutfitGenerator:
             score_outerwear_to_mid_top = OutfitGenerator.score_color_pair(distance_outerwear_to_mid_top, is_outerwear_neutral, is_mid_top_neutral)
             
             color_score = (score_mid_top_to_bottom*MID_TOP_TO_BOTTOM_MULTIPLIER + score_mid_top_to_shoes*MID_TOP_TO_SHOES_MULTIPLIER + score_mid_top_to_base_top*MID_TOP_TO_BASE_TOP_MULTIPLIER + score_outerwear_to_bottom*OUTERWEAR_TO_BOTTOM_MULTIPLIER_CASE4 + score_outerwear_to_shoes*OUTERWEAR_TO_SHOES_MULTIPLIER + score_outerwear_to_mid_top*OUTERWEAR_TO_MID_TOP_MULTIPLIER)/(MID_TOP_TO_BOTTOM_MULTIPLIER + MID_TOP_TO_SHOES_MULTIPLIER + MID_TOP_TO_BASE_TOP_MULTIPLIER + OUTERWEAR_TO_BOTTOM_MULTIPLIER_CASE4 + OUTERWEAR_TO_SHOES_MULTIPLIER + OUTERWEAR_TO_MID_TOP_MULTIPLIER)
+        
         pattern_score = OutfitGenerator.calculate_pattern_coherence(outfit, db)
         formality_score = OutfitGenerator.calculate_formality_alignment(outfit, db)
         total_score = color_score*color_weight + pattern_score*pattern_weight + formality_score*formality_weight
+        
         neutral_penalty = OutfitGenerator.calculate_neutral_penalty(outfit, db)
         color_bonus = OutfitGenerator.calculate_color_diversity_bonus(outfit, db)
         simplicity_bonus = OutfitGenerator.calculate_simplicity_bonus(outfit)
-        return max(0.0, total_score+neutral_penalty+color_bonus+simplicity_bonus)
+        
+        pair_penalties = OutfitGenerator.calculate_pair_penalties(outfit, db)
+
+        return max(0.0, total_score+neutral_penalty+color_bonus+simplicity_bonus+ pair_penalties)
     
     @staticmethod
     def debug_score_breakdown(outfit, db):
@@ -491,12 +521,14 @@ class OutfitGenerator:
         neutral_penalty = OutfitGenerator.calculate_neutral_penalty(outfit, db)
         color_bonus = OutfitGenerator.calculate_color_diversity_bonus(outfit, db)
         simplicity_bonus = OutfitGenerator.calculate_simplicity_bonus(outfit)
+        pair_penalties = OutfitGenerator.calculate_pair_penalties(outfit, db)
 
         print(f"Pattern coherence: {pattern_score:.3f}")
         print(f"Formality alignment: {formality_score:.3f}")
         print(f"Neutral penalty: {neutral_penalty:+.3f}")  # +/- sign
         print(f"Color diversity bonus: {color_bonus:+.3f}")
         print(f"Simplicity bonus: {simplicity_bonus:+.3f}")
+        print(f"Pair penalties: {pair_penalties:+.3f}")
 
         # === FORMALITY DETAILS ===
         print("\n--- Formality Details ---")

@@ -112,6 +112,24 @@ class DB_Manager():
                 CHECK (garment_id_1 < garment_id_2)
             )
         ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS outfit_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                outfit_signature TEXT NOT NULL,
+                shoes_id INTEGER NOT NULL,
+                bottom_id INTEGER NOT NULL,
+                base_top_id INTEGER NOT NULL,
+                mid_top_id INTEGER,
+                outerwear_id INTEGER,
+                worn_date DATE NOT NULL DEFAULT (date('now')),
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (shoes_id) REFERENCES garment(id),
+                FOREIGN KEY (bottom_id) REFERENCES garment(id),
+                FOREIGN KEY (base_top_id) REFERENCES garment(id),
+                FOREIGN KEY (mid_top_id) REFERENCES garment(id),
+                FOREIGN KEY (outerwear_id) REFERENCES garment(id)
+            )
+        ''')
         self.conn.commit()
 
     def _initialize_defaults(self):
@@ -262,6 +280,35 @@ class DB_Manager():
         cursor.execute("DELETE FROM feedback WHERE id = ?", (feedback_id,))
         self.conn.commit()
         return cursor.rowcount  # Restituisce 1 se cancellato, 0 se non trovato
+    
+    def add_outfit_to_history(self, outfit):
+        """Registra un outfit come indossato oggi"""
+        outfit_signature = f"{outfit.shoes}-{outfit.bottom}-{outfit.base_top}-{outfit.mid_top or 0}-{outfit.outerwear or 0}"
+
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT INTO outfit_history (outfit_signature, shoes_id, bottom_id, base_top_id, mid_top_id, outerwear_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (outfit_signature, outfit.shoes, outfit.bottom, outfit.base_top, outfit.mid_top, outfit.outerwear))
+        self.conn.commit()
+        return cursor.lastrowid
+    
+    def get_garment_last_worn_days(self, garment_id: int) -> int | None:
+        """
+        Restituisce quanti giorni fa un capo è stato indossato l'ultima volta.ù
+        Returns None se mai indossato.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT julianday('now') - julianday(worn_date) as days_ago
+            FROM outfit_history
+            WHERE shoes_id = ? OR bottom_id = ? OR base_top_id = ? OR mid_top_id = ? OR outerwear_id = ?
+            ORDER BY worn_date DESC
+            LIMIT 1
+        ''', (garment_id, garment_id, garment_id, garment_id, garment_id))
+
+        row = cursor.fetchone()
+        return int(row['days_ago']) if row else None
 
     def close(self):
         """Close connection when finished"""
