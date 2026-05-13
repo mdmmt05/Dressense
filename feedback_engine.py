@@ -17,6 +17,9 @@ PAIR_PENALTY_LIGHT = -0.03
 PAIR_PENALTY_MEDIUM = -0.05
 PAIR_PENALTY_HEAVY = -0.08
 
+# Positive reinforcement: reduce pair penalty by this amount (move toward zero)
+POSITIVE_PAIR_RELIEF = 0.02
+
 class FeedbackManager:
     def __init__(self, db: DB_Manager):
         self.db = db
@@ -38,18 +41,20 @@ class FeedbackManager:
         """Modifica i pesi globali in base alla reason"""
 
         if reason == FeedbackReason.TOO_FORMAL.value:
-            old_fw = weights_mgr.get_weight('formality_weight')
-            new_fw = weights_mgr.adjust_weight('formality_weight', -WEIGHT_ADJUSTMENT_SMALL)
-            print(f"  → formality_weight: {old_fw:.3f} → {new_fw:.3f}")
-            
-            old_ft = weights_mgr.get_weight('formality_threshold')
-            new_ft = weights_mgr.adjust_weight('formality_threshold', -THRESHOLD_ADJUSTMENT_FORMALITY)
-            print(f"  → formality_threshold: {old_ft:.1f} → {new_ft:.1f}")
-    
+            old_tf = weights_mgr.get_weight('target_formality')
+            new_tf = weights_mgr.adjust_weight(
+                'target_formality',
+                -THRESHOLD_ADJUSTMENT_FORMALITY
+            )
+            print(f"  → target_formality: {old_tf:.3f} → {new_tf:.3f}")
+        
         elif reason == FeedbackReason.TOO_CASUAL.value:
-            old_fw = weights_mgr.get_weight('formality_weight')
-            new_fw = weights_mgr.adjust_weight('formality_weight', +WEIGHT_ADJUSTMENT_SMALL)
-            print(f"  → formality_weight: {old_fw:.3f} → {new_fw:.3f}")
+            old_tf = weights_mgr.get_weight('target_formality')
+            new_tf = weights_mgr.adjust_weight(
+                'target_formality',
+                +THRESHOLD_ADJUSTMENT_FORMALITY
+            )
+            print(f"  → target_formality: {old_tf:.3f} → {new_tf:.3f}")
 
         elif reason == FeedbackReason.TOO_MANY_NEUTRALS.value:
             old_ns = weights_mgr.get_weight('neutral_saturation_threshold')
@@ -60,7 +65,6 @@ class FeedbackManager:
             old_cw = weights_mgr.get_weight('color_weight')
             new_cw = weights_mgr.adjust_weight('color_weight', +WEIGHT_ADJUSTMENT_MEDIUM)
             print(f"  → color_weight: {old_cw:.3f} → {new_cw:.3f}")
-
             old_pw = weights_mgr.get_weight('pattern_weight')
             new_pw = weights_mgr.adjust_weight('pattern_weight', -WEIGHT_ADJUSTMENT_SMALL)
             print(f"  → pattern_weight: {old_pw:.3f} → {new_pw:.3f}")
@@ -75,7 +79,7 @@ class FeedbackManager:
             new_pw = weights_mgr.adjust_weight('pattern_weight', +WEIGHT_ADJUSTMENT_SMALL)
             print(f"  → pattern_weight: {old_pw:.3f} → {new_pw:.3f}")
 
-        # COLORS_CLASH e DONT_LIKE_COMBINATION non modificano pesi globali
+        # COLORS_CLASH and DONT_LIKE_COMBINATION do not modify global weights
     
     def _apply_pair_penalties(self, outfit, reason: str, weights_mgr: WeightsManager):
         """Applica penalità alle coppie di item dell'outfit"""
@@ -100,8 +104,36 @@ class FeedbackManager:
         
         print(f"  → {len(pairs)} coppie penalizzate ({penalty:.3f} ciascuna)")
     
+    def _apply_positive_reinforcement(self, outfit, weights_mgr: WeightsManager):
+        """Slightly reduce existing negative pair penalties for liked outfits."""
+        garment_ids = self._get_garment_ids_from_outfit(outfit)
+        pairs = self._generate_all_pairs(garment_ids)
+        relief_applied = 0
+        for id1, id2 in pairs:
+            current = weights_mgr.get_pair_penalty(id1, id2)
+            if current < 0.0: # only reduce negative penalties
+                new_val = min(0.0, current + POSITIVE_PAIR_RELIEF)
+                # Directly set the pair penalty (no delta, clamp again)
+                weights_mgr.add_pair_penalty(id1, id2, new_val - current)
+                relief_applied += 1
+        if relief_applied:
+            print(f"  → {relief_applied} coppie con penalità leggermente ridotte (+{POSITIVE_PAIR_RELIEF:.2f} ciascuna)")
+
     def process_feedback(self, outfit, verdict, reason=None):
         """Processa feedback e aggiorna pesi/penalità"""
+        # Defensive validation
+        if verdict not in (0, 1):
+            raise ValueError(f"verdict must be 0 or 1, got {verdict}")
+        if verdict == 1 and reason is not None:
+            raise ValueError("Positive feedback cannot have a reason")
+        if verdict == 0:
+            if reason is None:
+                raise ValueError("Negative feedback requires a reason")
+            
+            valid_reasons = {r.value for r in FeedbackReason}
+            if reason not in valid_reasons:
+                raise ValueError(f"Invalid feedback reason: {reason}. Expected one of: {sorted(valid_reasons)}")
+        
         # 1. Registra nel database
         self.db.add_feedback(
             shoes_id=outfit.shoes,
@@ -113,9 +145,13 @@ class FeedbackManager:
             reason=reason
         )
         
-        # Se positivo, stop
         if verdict == 1:
             print("✓ Feedback positivo registrato!")
+            weights_mgr = WeightsManager(self.db)
+            # Positive reinforcement: reduce existing pair penalties
+            self._apply_positive_reinforcement(outfit, weights_mgr)
+            # Reload weights into OutfitGenerator (though no global weights changed)
+            OutfitGenerator.load_weights(weights_mgr.get_all_weights())
             return
         
         print("✓ Feedback negativo registrato")

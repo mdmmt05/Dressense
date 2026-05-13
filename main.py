@@ -4,34 +4,54 @@ import sys
 from outfit_engine import OutfitGenerator
 from feedback_engine import FeedbackManager
 
-db = DB_Manager()
-weights_manager = WeightsManager(db)
-feedback_manager = FeedbackManager(db)
-
-OutfitGenerator.load_weights(weights_manager.get_all_weights())
-
-current_outfit = None
+feedback_manager = None
 
 def add_new_garment(db: DB_Manager):
-    name = input("Inserisci nome: ")
-    category = input("Inserisci categoria: ")
-    layer_role = input("Inserisci layer_role [base, mid, outer, none]: ")
-    color = input("Inserisci color (CSS tables): ")
-    # Conversione colore
-    color_hex = css_to_hex(color)
-    rgb = css_to_rgb(color)
-    lab = rgb_to_cielab(rgb)
-    color_lab_l = lab[0]
-    color_lab_a = lab[1]
-    color_lab_b = lab[2]
-    pattern = input("Inserisci pattern: ")
-    warmth = int(input("Inserisci warmth [1-10]: "))
-    formality = int(input("Inserisci formality [1-10]: "))
-    season_tags = input("Inserisci season_tags: ")
-    occasion_tags = input("Inserisci occasion_tags: ")
-    active_input = input("Attivo? [s/n]: ")
+    name = input("Inserisci nome: ").strip()
+    if not name:
+        print("Nome non valido")
+        return
+    category = input("Inserisci categoria: ").strip()
+    if not category:
+        print("Categoria non valida")
+        return
+    while True:
+        layer_role = input("Inserisci layer_role [base, mid, outer, none]: ").strip().lower()
+        if layer_role in ('base', 'mid', 'outer', 'none'):
+            break
+        print("Valore non valido. Scegli tra base, mid, outer, none.")
+    while True:
+        color = input("Inserisci colore (CSS name, es. 'red'): ").strip()
+        try:
+            color_hex = css_to_hex(color)
+            rgb = css_to_rgb(color)
+            lab = rgb_to_cielab(rgb)
+            break
+        except ValueError as e:
+            print(f"Errore colore: {e}. Riprova.")
+    pattern = input("Inserisci pattern: ").strip()
+    while True:
+        try:
+            warmth = int(input("Inserisci warmth [1-10]: "))
+            if 1 <= warmth <= 10:
+                break
+            print("Deve essere tra 1 e 10")
+        except ValueError:
+            print("Inserisci un numero intero")
+    while True:
+        try:
+            formality = int(input("Inserisci formality [1-10]: "))
+            if 1 <= formality <= 10:
+                break
+            print("Deve essere tra 1 e 10")
+        except ValueError:
+            print("Inserisci un numero intero")
+    season_tags = input("Inserisci season_tags: ").strip()
+    occasion_tags = input("Inserisci occasion_tags: ").strip()
+    active_input = input("Attivo? [s/n]: ").strip().lower()
     active = active_input == 's'
-    garment = Garment(name, category, layer_role, color_hex, color_lab_l, color_lab_a, color_lab_b, pattern, warmth, formality, season_tags, occasion_tags, active)
+    garment = Garment(name, category, layer_role, color_hex, lab[0], lab[1], lab[2],
+                      pattern, warmth, formality, season_tags, occasion_tags, active)
     garment_id = db.add_garment(garment)
     print(f"Capo '{name}' aggiunto correttamente con ID {garment_id}")
 
@@ -59,7 +79,7 @@ def generate_and_display_outfit(db: DB_Manager):
     # Validazione
     if not shoes_list or not bottoms_list or not base_tops_list:
         print("Wardrobe insufficiente (servono almeno: scarpe, pantaloni, base top)")
-        return
+        return None
     
     mid_tops_list = db.get_garments_by_layer('mid')
     outerwear_list = db.get_garments_by_layer('outer')
@@ -93,82 +113,124 @@ def generate_and_display_outfit(db: DB_Manager):
 
             if verdict_input == 'skip':
                 print("⏭️  Rating saltato\n")
-                return outfit
-            
-            verdict = 1 if verdict_input == 's' else 0
-
-            reason = None
-            if verdict == 0:
-                reasons = [r.value for r in FeedbackReason]
-                for i, r in enumerate(reasons, 1):
-                    print(f"{i}. {r}")
-                
-                choice = int(input("Scegli il motivo [1-8]: "))
-                if not 1 <= choice <= len(reasons):
-                    raise ValueError("Scelta non valida")
-                reason = reasons[choice - 1]
-
-            feedback_manager.process_feedback(outfit, verdict, reason)
+            else:
+                verdict = 1 if verdict_input == 's' else 0
+                reason = None
+                if verdict == 0:
+                    reasons = [r.value for r in FeedbackReason]
+                    for i, r in enumerate(reasons, 1):
+                        print(f"{i}. {r}")
+                    while True:
+                        try:
+                            choice = int(input("Scegli il motivo [1-8]: "))
+                            if 1 <= choice <= len(reasons):
+                                reason = reasons[choice - 1]
+                                break
+                            print(f"Scegli un numero tra 1 e {len(reasons)}")
+                        except ValueError:
+                            print("Inserisci un numero")
+                feedback_manager.process_feedback(outfit, verdict, reason)
         except (KeyboardInterrupt, EOFError):
             print("\n⏭️  Rating saltato\n")
-        
+        try:
+            mark = input("Vuoi segnare questo outfit come indossato oggi? [y/n]: ").lower()
+            if mark == 'y':
+                db.add_outfit_to_history(outfit)
+                print("✓ Outfit registrato come indossato!")
+            else:
+                print("⏭️  Non registrato.")
+        except (KeyboardInterrupt, EOFError):
+            print("\n⏭️  Non registrato.")
         return outfit
     else:
         print("Nessun outfit valido trovato!")
         return None
 
-print("Buongiorno Michele!")
-print("Cosa vuoi fare?")
-print("a -> Aggiungere nuovo capo")
-print("l -> Listare capi esistenti")
-print("deac -> Disattiva un capo")
-print("ac -> Attiva un capo")
-print("d -> Ottieni dettagli su un capo")
-print("r -> Rimuovi un capo")
-while True:
-    try:
-        option = input("> ").lower()
-        if option == 'a':
-            add_new_garment(db)
-        elif option == 'l':
-            garments = db.list_garments(show_inactive=True)
-            for garment in garments:
-                print(f"{garment['id']}: {garment['name']} ({garment['category']})")
-        elif option == "deac":
-            garment_id = int(input("Inserisci id: "))
-            if db.deactivate_garment(garment_id):
-                print("Capo disattivato")
+def main():
+    global feedback_manager
+
+    db = DB_Manager()
+    weights_manager = WeightsManager(db)
+    feedback_manager = FeedbackManager(db)
+    
+    OutfitGenerator.load_weights(weights_manager.get_all_weights())
+
+    current_outfit = None
+
+    print("Buongiorno Michele!")
+    print("Cosa vuoi fare?")
+    print("a -> Aggiungere nuovo capo")
+    print("l -> Listare capi esistenti")
+    print("deac -> Disattiva un capo")
+    print("ac -> Attiva un capo")
+    print("d -> Ottieni dettagli su un capo")
+    print("r -> Rimuovi un capo")
+    print("g -> Genera outfit")
+    while True:
+        try:
+            option = input("> ").lower()
+            if option == 'a':
+                add_new_garment(db)
+            elif option == 'l':
+                garments = db.list_garments(show_inactive=True)
+                for g in garments:
+                    print(f"{g['id']}: {g['name']} ({g['category']})")
+            elif option == "deac":
+                try:
+                    garment_id = int(input("Inserisci id: "))
+                    if db.deactivate_garment(garment_id):
+                        print("Capo disattivato")
+                    else:
+                        print("ID non trovato")
+                except ValueError:
+                    print("ID non valido")
+            elif option == "ac":
+                try:
+                    garment_id = int(input("Inserisci id: "))
+                    if db.activate_garment(garment_id):
+                        print("Capo attivato")
+                    else:
+                        print("ID non trovato")
+                except ValueError:
+                    print("ID non valido")
+            elif option == "d":
+                try:
+                    garment_id = int(input("Inserisci id: "))
+                    garment = db.get_garment(garment_id)
+                    if garment:
+                        garment_details(garment)
+                    else:
+                        print("✗ Capo non trovato")
+                except ValueError:
+                    print("ID non valido")
+            elif option == "r":
+                try:
+                    garment_id = int(input("Inserisci id: "))
+                    deleted = db.delete_garment(garment_id)
+                    if deleted:
+                        print("Capo rimosso")
+                    else:
+                        print("Impossibile rimuovere (capo ha riferimenti o ID non valido)")
+                except ValueError:
+                    print("ID non valido")
+            # Funzionalità fantasma, l'utente NON ne è a conoscenza
+            elif option == 'm':
+                try:
+                    garment_id = int(input("Inserisci id: "))
+                    field_name = input("Inserisci field_name: ")
+                    new_value = input("Inserisci il nuovo valore: ")
+                    db.update_garment_field(garment_id, field_name, new_value)
+                    print("Elemento aggiornato con successo!")
+                except ValueError as e:
+                    print(f"Errore: {e}")
+            elif option == 'g':
+                current_outfit = generate_and_display_outfit(db)
             else:
-                print("ID non trovato")
-        elif option == "ac":
-            garment_id = int(input("Inserisci id: "))
-            if db.activate_garment(garment_id):
-                print("Capo attivato")
-            else:
-                print("ID non trovato")
-        elif option == "d":
-            garment_id = int(input("Inserisci id: "))
-            garment = db.get_garment(garment_id)
-            if garment:
-                garment_details(garment)
-            else:
-                print("✗ Capo non trovato")
-        elif option == "r":
-            garment_id = int(input("Inserisci id: "))
-            db.delete_garment(garment_id)
-        # Funzionalità fantasma, l'utente NON ne è a conoscenza
-        elif option == 'm':
-            garment_id = int(input("Inserisci id: "))
-            field_name = input("Inserisci field_name: ")
-            new_value = input("Inserisci il nuovo valore: ")
-            edit = db.update_garment_field(garment_id, field_name, new_value)
-            if edit:
-                print("Elemento aggiornato con successo!")
-            else:
-                print("Id non valido")
-        elif option == 'g':
-            current_outfit = generate_and_display_outfit(db)
-    except KeyboardInterrupt:
-        print("Exiting...")
-        db.close()
-        sys.exit(0)
+                print("Comando sconosciuto")
+        except KeyboardInterrupt:
+            print("Exiting...")
+            db.close()
+            sys.exit(0)
+
+if __name__ == "__main__":
+    main()

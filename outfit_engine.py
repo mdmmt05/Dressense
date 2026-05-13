@@ -5,23 +5,6 @@ import random
 import math
 from db_manager import DB_Manager, WeightsManager
 
-FORMALITY_THRESHOLD = 4
-NEUTRAL_SATURATION_THRESHOLD = 20
-
-BASE_TOP_TO_BOTTOM_MULTIPLIER = 1.0
-BASE_TOP_TO_SHOES_MULTIPLIER = 0.8
-
-MID_TOP_TO_BOTTOM_MULTIPLIER = 1.0
-MID_TOP_TO_SHOES_MULTIPLIER = 0.8
-MID_TOP_TO_BASE_TOP_MULTIPLIER = 0.5
-
-OUTERWEAR_TO_BOTTOM_MULTIPLIER = 0.4
-OUTERWEAR_TO_SHOES_MULTIPLIER = 0.3
-OUTERWEAR_TO_BASE_TOP_MULTIPLIER = 0.3
-
-OUTERWEAR_TO_MID_TOP_MULTIPLIER = 0.3
-OUTERWEAR_TO_BOTTOM_MULTIPLIER_CASE4 = 0.3
-
 #COLOR_WEIGHT = 0.55
 #PATTERN_WEIGHT = 0.3
 #FORMALITY_WEIGHT = 0.15
@@ -44,6 +27,7 @@ class OutfitGenerator:
         'color_weight': 0.55,
         'pattern_weight': 0.3,
         'formality_weight': 0.15,
+        'target_formality': 5.0,
     }
 
     @classmethod
@@ -73,12 +57,12 @@ class OutfitGenerator:
         Verifica se un garment ha colore neutrale
         Neutrali hanno bassa saturazione (a e b vicini a 0)
         """
+        threshold = OutfitGenerator.weights.get('neutral_saturation_threshold', 20)
         a = garment['color_lab_a']
         b = garment['color_lab_b']
-
         # Calcola la saturazione (distanza dall'asse L)
         saturation = math.sqrt(a**2 + b**2)
-        return saturation < NEUTRAL_SATURATION_THRESHOLD
+        return saturation < threshold
     
     @staticmethod
     def score_color_pair(distance: float, is_neutral1: bool, is_neutral2: bool) -> float:
@@ -120,7 +104,6 @@ class OutfitGenerator:
 
         neutral_count = sum(1 for g in garments if OutfitGenerator.is_neutral_color(g))
         total_count = len(garments)
-
         neutral_ratio = neutral_count / total_count
 
         # Penalità progressiva
@@ -236,7 +219,7 @@ class OutfitGenerator:
     @staticmethod
     def calculate_formality_alignment(outfit, db) -> float:
         """Score basato su allineamento formality"""
-
+        threshold = OutfitGenerator.weights.get('formality_threshold', 4)
         # Carica garment
         garments = [
             db.get_garment(outfit.shoes),
@@ -257,16 +240,36 @@ class OutfitGenerator:
         gap = max_form - min_form
 
         # Score basato sul gap
-        if gap <= FORMALITY_THRESHOLD-3:
+        if gap <= threshold-3:
             return 1.0
-        elif gap == FORMALITY_THRESHOLD-2:
+        elif gap == threshold-2:
             return 0.95
-        elif gap == FORMALITY_THRESHOLD-1:
+        elif gap == threshold-1:
             return 0.85
-        elif gap == FORMALITY_THRESHOLD:
+        elif gap == threshold:
             return 0.6
         else:
             return 0.0  # non dovrebbe accadere
+    
+    @staticmethod
+    def calculate_target_formality_score(outfit, db) -> float:
+        """Rewards outfits whose average formality is close to target_formality."""
+        target = OutfitGenerator.weights.get('target_formality', 5.0)
+        garments = [
+            db.get_garment(outfit.shoes),
+            db.get_garment(outfit.bottom),
+            db.get_garment(outfit.base_top)
+        ]
+        if outfit.mid_top:
+            garments.append(db.get_garment(outfit.mid_top))
+        if outfit.outerwear:
+            garments.append(db.get_garment(outfit.outerwear))
+
+        avg_formality = sum(g['formality'] for g in garments) / len(garments)
+        distance = abs(avg_formality - target)
+        # Score decreases linearly from 1.0 (distance 0) to 0.0 (distance >= 5)
+        score = max(0.0, 1.0 - distance / 5.0)
+        return score
     
     @staticmethod
     def calculate_simplicity_bonus(outfit) -> float:
@@ -293,7 +296,6 @@ class OutfitGenerator:
     def calculate_pair_penalties(outfit, db) -> float:
         """Calcola la somma delle penalità per tutte le coppie nell'outfit"""
         weights_mgr = WeightsManager(db)
-
         # Raccogli tutti i garment_id
         garment_ids = [outfit.shoes, outfit.bottom, outfit.base_top]
         if outfit.mid_top:
@@ -306,13 +308,32 @@ class OutfitGenerator:
         for id1, id2 in combinations(garment_ids, 2):
             penalty = weights_mgr.get_pair_penalty(id1, id2)
             total_penalty += penalty
-        
         return total_penalty
     
     @staticmethod
     def calculate_recently_worn_penalty(outfit, db) -> float:
         """Calcola penalità per capi indossati di recente"""
-        pass
+        garment_ids = [outfit.shoes, outfit.bottom, outfit.base_top]
+        if outfit.mid_top:
+            garment_ids.append(outfit.mid_top)
+        if outfit.outerwear:
+            garment_ids.append(outfit.outerwear)
+        
+        penalty = 0.0
+        for gid in garment_ids:
+            days_ago = db.get_garment_last_worn_days(gid)
+            if days_ago is None:
+                continue
+            if days_ago == 0:
+                penalty -= 0.08
+            elif days_ago == 1:
+                penalty -= 0.05
+            elif 2 <= days_ago <= 3:
+                penalty -= 0.03
+            elif 4 <= days_ago <= 7:
+                penalty -= 0.01
+            # >7 days: no penalty
+        return penalty
     
     @staticmethod
     def score_calculator(outfit, db) -> float:
@@ -336,7 +357,7 @@ class OutfitGenerator:
             distance_base_top_to_shoes = OutfitGenerator.calculate_lab_distance(lab_base_top, lab_shoes)
             score_base_top_to_shoes = OutfitGenerator.score_color_pair(distance_base_top_to_shoes, is_base_top_neutral, is_shoes_neutral)
 
-            color_score = (score_base_top_to_bottom*BASE_TOP_TO_BOTTOM_MULTIPLIER + score_base_top_to_shoes*BASE_TOP_TO_SHOES_MULTIPLIER)/(BASE_TOP_TO_BOTTOM_MULTIPLIER+BASE_TOP_TO_SHOES_MULTIPLIER)
+            color_score = (score_base_top_to_bottom*1.0 + score_base_top_to_shoes*0.8)/1.8
         # Caso 2: shoes + bottom + base_top + mid_top
         elif outfit.outerwear is None:
             shoes = db.get_garment(outfit.shoes)
@@ -359,7 +380,7 @@ class OutfitGenerator:
             distance_mid_top_to_base_top = OutfitGenerator.calculate_lab_distance(lab_mid_top, lab_base_top)
             score_mid_top_to_base_top = OutfitGenerator.score_color_pair(distance_mid_top_to_base_top, is_mid_top_neutral, is_base_top_neutral)
             
-            color_score = (score_mid_top_to_bottom*MID_TOP_TO_BOTTOM_MULTIPLIER + score_mid_top_to_shoes*MID_TOP_TO_SHOES_MULTIPLIER + score_mid_top_to_base_top*MID_TOP_TO_BASE_TOP_MULTIPLIER)/(MID_TOP_TO_BOTTOM_MULTIPLIER + MID_TOP_TO_SHOES_MULTIPLIER + MID_TOP_TO_BASE_TOP_MULTIPLIER)
+            color_score = (score_mid_top_to_bottom*1.0 + score_mid_top_to_shoes*0.8 + score_mid_top_to_base_top*0.5)/(1.0+0.8+0.5)
         # Caso 3: shoes + bottom + base_top + outerwear
         elif outfit.mid_top is None:
             shoes = db.get_garment(outfit.shoes)
@@ -386,7 +407,7 @@ class OutfitGenerator:
             distance_outerwear_to_base_top = OutfitGenerator.calculate_lab_distance(lab_outerwear, lab_base_top)
             score_outerwear_to_base_top = OutfitGenerator.score_color_pair(distance_outerwear_to_base_top, is_outerwear_neutral, is_base_top_neutral)
             
-            color_score = (score_base_top_to_bottom*BASE_TOP_TO_BOTTOM_MULTIPLIER + score_base_top_to_shoes*BASE_TOP_TO_SHOES_MULTIPLIER + score_outerwear_to_bottom*OUTERWEAR_TO_BOTTOM_MULTIPLIER + score_outerwear_to_shoes*OUTERWEAR_TO_SHOES_MULTIPLIER + score_outerwear_to_base_top*OUTERWEAR_TO_BASE_TOP_MULTIPLIER)/(BASE_TOP_TO_BOTTOM_MULTIPLIER + BASE_TOP_TO_SHOES_MULTIPLIER + OUTERWEAR_TO_BOTTOM_MULTIPLIER + OUTERWEAR_TO_SHOES_MULTIPLIER + OUTERWEAR_TO_BASE_TOP_MULTIPLIER)
+            color_score = (score_base_top_to_bottom*1.0 + score_base_top_to_shoes*0.8 + score_outerwear_to_bottom*0.4 + score_outerwear_to_shoes*0.3 + score_outerwear_to_base_top*0.3)/(1.0+0.8+0.4+0.3+0.3)
         # Caso 4: shoes + bottom + base_top + mid_top + outerwear
         else:
             shoes = db.get_garment(outfit.shoes)
@@ -418,19 +439,29 @@ class OutfitGenerator:
             distance_outerwear_to_mid_top = OutfitGenerator.calculate_lab_distance(lab_outerwear, lab_mid_top)
             score_outerwear_to_mid_top = OutfitGenerator.score_color_pair(distance_outerwear_to_mid_top, is_outerwear_neutral, is_mid_top_neutral)
             
-            color_score = (score_mid_top_to_bottom*MID_TOP_TO_BOTTOM_MULTIPLIER + score_mid_top_to_shoes*MID_TOP_TO_SHOES_MULTIPLIER + score_mid_top_to_base_top*MID_TOP_TO_BASE_TOP_MULTIPLIER + score_outerwear_to_bottom*OUTERWEAR_TO_BOTTOM_MULTIPLIER_CASE4 + score_outerwear_to_shoes*OUTERWEAR_TO_SHOES_MULTIPLIER + score_outerwear_to_mid_top*OUTERWEAR_TO_MID_TOP_MULTIPLIER)/(MID_TOP_TO_BOTTOM_MULTIPLIER + MID_TOP_TO_SHOES_MULTIPLIER + MID_TOP_TO_BASE_TOP_MULTIPLIER + OUTERWEAR_TO_BOTTOM_MULTIPLIER_CASE4 + OUTERWEAR_TO_SHOES_MULTIPLIER + OUTERWEAR_TO_MID_TOP_MULTIPLIER)
+            color_score = (score_mid_top_to_bottom*1.0 + score_mid_top_to_shoes*0.8 + score_mid_top_to_base_top*0.5 + score_outerwear_to_bottom*0.3 + score_outerwear_to_shoes*0.3 + score_outerwear_to_mid_top*0.3)/(1.0+0.8+0.5+0.3+0.3+0.3)
         
         pattern_score = OutfitGenerator.calculate_pattern_coherence(outfit, db)
-        formality_score = OutfitGenerator.calculate_formality_alignment(outfit, db)
-        total_score = color_score*color_weight + pattern_score*pattern_weight + formality_score*formality_weight
+        coherence_score = OutfitGenerator.calculate_formality_alignment(outfit, db)
+
+        target_score = OutfitGenerator.calculate_target_formality_score(outfit, db)
+
+        # Combina coherence and target preference (70% coherence, 30% target)
+        formality_score = 0.7 * coherence_score + 0.3 * target_score
         
         neutral_penalty = OutfitGenerator.calculate_neutral_penalty(outfit, db)
         color_bonus = OutfitGenerator.calculate_color_diversity_bonus(outfit, db)
         simplicity_bonus = OutfitGenerator.calculate_simplicity_bonus(outfit)
-        
         pair_penalties = OutfitGenerator.calculate_pair_penalties(outfit, db)
+        recently_worn_penalty = OutfitGenerator.calculate_recently_worn_penalty(outfit, db)
+        
+        total_score = (color_score * color_weight + 
+                       pattern_score * pattern_weight + 
+                       formality_score * formality_weight + 
+                       neutral_penalty + color_bonus + simplicity_bonus + 
+                       pair_penalties + recently_worn_penalty)
 
-        return max(0.0, total_score+neutral_penalty+color_bonus+simplicity_bonus+ pair_penalties)
+        return max(0.0, min(1.0, total_score))
     
     @staticmethod
     def debug_score_breakdown(outfit, db):
@@ -564,7 +595,8 @@ class OutfitGenerator:
 
     @staticmethod
     def generate(shoes_list, bottoms_list, base_tops_list, mid_tops_list, outerwear_list, db, count: int = 1, top_pool: int = 150) -> list[Outfit]:
-        # Logica generazionale
+        # Use adaptive formality threshold for hard filtering
+        formality_threshold = OutfitGenerator.weights.get('formality_threshold', 4)
         mid_options = [None] + mid_tops_list
         outer_options = [None] + outerwear_list
 
@@ -582,7 +614,7 @@ class OutfitGenerator:
             formalities = [shoes['formality'], bottom['formality'], base['formality']]
             if mid is not None: formalities.append(mid['formality'])
             if outer is not None: formalities.append(outer['formality'])
-            if max(formalities) - min(formalities) > FORMALITY_THRESHOLD:
+            if max(formalities) - min(formalities) > formality_threshold:
                 continue # gap troppo grande
             # Crea outfit candidato
             outfit = Outfit(
@@ -592,12 +624,10 @@ class OutfitGenerator:
                 mid_top=mid['id'] if mid else None,
                 outerwear=outer['id'] if outer else None
             )
-            
             outfit.score = OutfitGenerator.score_calculator(outfit, db)
-
             valid_outfits.append(outfit)
         
-        if len(valid_outfits) == 0:
+        if not valid_outfits:
             print("Wardrobe insufficiente per generare outfit!")
             return []
         if len(valid_outfits) < count:
@@ -615,8 +645,8 @@ class OutfitGenerator:
 
         # Dopo il sort, guarda i top 10
         print("\nTop 10 outfit per score:")
-        for i, outfit in enumerate(valid_outfits[:10], 1):
-            print(f"{i}. Score: {outfit.score:.3f} - Mid: {outfit.mid_top}")
+        for i, o in enumerate(valid_outfits[:10], 1):
+            print(f"{i}. Score: {o.score:.3f} - Mid: {o.mid_top}")
 
         top_candidates = valid_outfits[:top_pool]
         pool_size = min(top_pool, len(top_candidates))

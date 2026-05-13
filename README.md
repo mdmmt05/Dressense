@@ -17,7 +17,8 @@ At some point, I got tired of that dependency. So I did what any self-respecting
 ## ✨ Features
 
 - **Smart outfit generation** — Combines hard constraints (valid layering, category uniqueness, active garments only, formality coherence) with soft scoring (color harmony, pattern coherence, formality alignment, simplicity bias) to surface the best possible outfit from your wardrobe.
-- **Adaptive Preference Engine** — When you dislike an outfit, Dressense doesn't just move on. It adjusts its internal scoring weights and applies penalties to specific garment combinations so it won't make the same mistake twice.
+- **Adaptive Preference Engine** — When you dislike an outfit, Dressense doesn't just move on. It adjusts its internal scoring weights and applies penalties to specific garment combinations so it won't make the same mistake twice. Positive ratings gradually heal those penalties over time.
+- **Outfit history tracking** — Mark outfits as worn. Dressense tracks how recently each garment was used and penalizes recently-worn items to promote variety.
 - **CIELab color science** — Colors are evaluated in perceptual color space (CIELab), not just by name, making harmony scoring more accurate and nuanced.
 - **Full wardrobe management** — Add, remove, activate, deactivate, and inspect garments with detailed metadata (warmth, formality, pattern, season tags, occasion tags, and more).
 - **SQLite persistence** — Your wardrobe and all learned preferences are stored locally in a lightweight SQLite database.
@@ -70,11 +71,14 @@ The `OutfitGenerator` evaluates all valid garment combinations using a two-pass 
 
 **Soft constraints** score the remaining candidates:
 - Color harmony (via CIELab distance)
-- Pattern coherence
-- Formality alignment
+- Pattern coherence (based on visible garments only — what's covered doesn't count)
+- Formality alignment to a learned target
+- Neutral color balance (penalty for all-neutral outfits, bonus for color diversity)
 - Simplicity bias (penalizes unnecessary layers)
+- Recently-worn penalty (promotes wardrobe variety)
+- Learned pair penalties (discourages disliked combinations)
 
-The top-scoring outfit is presented to the user.
+The top candidates are pooled and one is selected at random, so you're not always shown the exact same outfit.
 
 ### Adaptive Preference Engine
 
@@ -82,15 +86,28 @@ Every time you rate an outfit negatively, Dressense adjusts its behavior based o
 
 | Reason | Effect |
 |---|---|
-| Too formal / Too casual | Adjusts formality weight and threshold |
+| Too formal | Shifts `target_formality` down |
+| Too casual | Shifts `target_formality` up |
 | Too many neutrals | Lowers the neutral saturation threshold |
 | Boring | Increases color weight |
 | Too flashy | Decreases color weight |
 | Bad layering | Adjusts pattern weight |
-| Colors clash | Applies heavy penalties to all garment pairs in the outfit |
-| Don't like the combination | Applies medium penalties to all garment pairs |
+| Colors clash | Applies heavy pair penalties to all garment pairs in the outfit |
+| Don't like the combination | Applies medium pair penalties to all garment pairs |
 
-Weights are persisted to the database and loaded at every startup — so the system remembers your preferences across sessions.
+Positive ratings gradually reduce existing pair penalties, giving previously-penalized combinations a second chance over time.
+
+All weights and penalties are persisted to SQLite and reloaded at startup — so the system remembers your preferences across sessions.
+
+### Database Schema
+
+Dressense uses five tables:
+
+- `garment` — your wardrobe items with full metadata
+- `feedback` — history of all ratings with reasons
+- `weights` — adaptive scoring parameters (with min/max bounds and defaults)
+- `pair_penalties` — learned penalties for specific garment combinations
+- `outfit_history` — log of outfits marked as worn, used for recency scoring
 
 ---
 
@@ -99,8 +116,8 @@ Weights are persisted to the database and loaded at every startup — so the sys
 ```
 dressense/
 ├── main.py             # CLI interface and main loop
-├── db_manager.py       # SQLite abstraction, garment CRUD, weights management
-├── outfit_engine.py    # Outfit generation and scoring logic
+├── db_manager.py       # SQLite abstraction, garment CRUD, weights & penalties management
+├── outfit_engine.py    # Outfit generation, scoring, and debug tools
 ├── feedback_engine.py  # Adaptive Preference Engine
 └── color_utils.py      # Color conversion utilities (CSS → RGB → CIELab)
 ```
