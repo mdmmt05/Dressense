@@ -71,6 +71,31 @@ def garment_details(garment):
 
 def generate_and_display_outfit(db: DB_Manager):
     """Genera e mostra outfit suggerito"""
+    valid_seasons = ["auto", "none", "spring", "summer", "autumn", "winter"]
+    while True:
+        season_input = input("Season context [auto/none/spring/summer/autumn/winter] (default: auto): ").strip().lower()
+        if season_input == "":
+            season_input = "auto"
+        if season_input in valid_seasons:
+            break
+        print(f"Valore non valido. Scegli tra {', '.join(valid_seasons)}")
+    valid_occasions = ["none", "university", "work_casual", "evening", "event"]
+    while True:
+        occasion_input = input("Occasion context [none/university/work_casual/evening/event] (default: none): ").strip().lower()
+        if occasion_input == "":
+            occasion_input = "none"
+        if occasion_input in valid_occasions:
+            break
+        print(f"Valore non valido. Scegli tra {', '.join(valid_occasions)}")
+
+    # Resolve season for display (auto -> actual season)
+    if season_input == "auto":
+        resolved_season = OutfitGenerator.infer_current_season()
+        print(f"Context: season={resolved_season} (auto), occasion={occasion_input}")
+    else:
+        resolved_season = season_input if season_input != "none" else None
+        print(f"Context: season={season_input}, occasion={occasion_input}")
+
     # Fetch garment
     shoes_list = db.get_garments_by_category('shoes')
     bottoms_list = db.get_garments_by_category('trousers')
@@ -87,7 +112,9 @@ def generate_and_display_outfit(db: DB_Manager):
     # Genera
     outfits = OutfitGenerator.generate(
         shoes_list, bottoms_list, base_tops_list,
-        mid_tops_list, outerwear_list, db, count=1
+        mid_tops_list, outerwear_list, db, count=1,
+        season=season_input,
+        occasion=occasion_input if occasion_input != "none" else None
     )
     
     # Display
@@ -143,7 +170,7 @@ def generate_and_display_outfit(db: DB_Manager):
             print("\n⏭️  Non registrato.")
         return outfit
     else:
-        print("Nessun outfit valido trovato!")
+        print("Nessun outfit valido trovato! Prova a modificare i vincoli stagionali o ad aggiungere più capi.")
         return None
 
 def main():

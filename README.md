@@ -16,7 +16,8 @@ At some point, I got tired of that dependency. So I did what any self-respecting
 
 ## ✨ Features
 
-- **Smart outfit generation** — Combines hard constraints (valid layering, category uniqueness, active garments only, formality coherence) with soft scoring (color harmony, pattern coherence, formality alignment, simplicity bias) to surface the best possible outfit from your wardrobe.
+- **Smart outfit generation** — Combines hard constraints (valid layering, category uniqueness, active garments only, formality coherence, seasonal warmth range) with soft scoring (color harmony, pattern coherence, formality alignment, simplicity bias, and more) to surface the best possible outfit from your wardrobe.
+- **Context-aware suggestions** — Specify a season (or let Dressense detect it automatically from the current date) and an occasion to steer generation toward appropriate outfits. Season filtering is enforced as a hard constraint on total outfit warmth; occasion matching influences scoring through tag overlap and formality range.
 - **Adaptive Preference Engine** — When you dislike an outfit, Dressense doesn't just move on. It adjusts its internal scoring weights and applies penalties to specific garment combinations so it won't make the same mistake twice. Positive ratings gradually heal those penalties over time.
 - **Outfit history tracking** — Mark outfits as worn. Dressense tracks how recently each garment was used and penalizes recently-worn items to promote variety.
 - **CIELab color science** — Colors are evaluated in perceptual color space (CIELab), not just by name, making harmony scoring more accurate and nuanced.
@@ -68,6 +69,7 @@ The `OutfitGenerator` evaluates all valid garment combinations using a two-pass 
 - One garment per category
 - Active garments only
 - Formality coherence across the full outfit
+- Seasonal warmth range (total outfit warmth must fall within the season's allowed bounds)
 
 **Soft constraints** score the remaining candidates:
 - Color harmony (via CIELab distance)
@@ -77,8 +79,32 @@ The `OutfitGenerator` evaluates all valid garment combinations using a two-pass 
 - Simplicity bias (penalizes unnecessary layers)
 - Recently-worn penalty (promotes wardrobe variety)
 - Learned pair penalties (discourages disliked combinations)
+- Season fit (soft penalty for warmth values far from the season's ideal target)
+- Occasion tag match (penalty for garments whose tags don't include the selected occasion)
+- Occasion formality alignment (penalty if the outfit's average formality falls outside the occasion's recommended range)
 
 The top candidates are pooled and one is selected at random, so you're not always shown the exact same outfit.
+
+### Context Awareness
+
+When generating an outfit, you can optionally provide:
+
+- **Season** — `auto` (detected from the current month), `spring`, `summer`, `autumn`, `winter`, or `none`. Season filtering works in two stages: a hard warmth range eliminates outfits that are clearly too warm or too cold, while a soft adjustment further rewards combinations closest to the season's warmth target.
+- **Occasion** — `university`, `work_casual`, `evening`, `event`, or `none`. Two scoring adjustments are applied: one based on how many garments carry the occasion's tag, and one based on whether the outfit's average formality sits within the occasion's recommended range.
+
+| Season | Warmth range | Warmth target |
+|---|---|---|
+| Summer | 3 – 13 | 8 |
+| Spring | 6 – 18 | 12 |
+| Autumn | 8 – 22 | 16 |
+| Winter | 14 – 32 | 22 |
+
+| Occasion | Formality range |
+|---|---|
+| University | 2 – 6 |
+| Work casual | 4 – 7 |
+| Evening | 5 – 8 |
+| Event | 6 – 10 |
 
 ### Adaptive Preference Engine
 
@@ -126,13 +152,11 @@ dressense/
 
 ## 🗺️ Roadmap
 
-Dressense is under active development. Here's where we're headed:
-
 | Phase | Status | Description |
 |---|---|---|
 | **Phase 1** — Core engine | ✅ Complete | Wardrobe management, outfit generation, scoring |
 | **Phase 2** — Adaptive Preference Engine | ✅ Complete | Feedback-driven weight adjustment and pair penalties |
-| **Phase 3** — Context awareness | 🔜 Planned | Season and occasion filtering (no summer outfits in winter, no casual outfits for formal events) |
+| **Phase 3** — Context awareness | ✅ Complete | Season and occasion filtering (hard warmth constraints + soft scoring adjustments) |
 | **Phase 4** — Quality of life | 🔜 Planned | "Swap only one item", generate multiple outfits at once, garment usage reports |
 | **Phase 5** — Machine learning | 🔜 Planned | Convert accumulated feedback into a training dataset; lightweight ML model for scoring |
 

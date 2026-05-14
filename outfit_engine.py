@@ -1,8 +1,9 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from itertools import product, combinations
 import random
 import math
+from datetime import datetime
 from db_manager import DB_Manager, WeightsManager
 
 #COLOR_WEIGHT = 0.55
@@ -29,6 +30,23 @@ class OutfitGenerator:
         'formality_weight': 0.15,
         'target_formality': 5.0,
     }
+
+    # Phase 3: season and occasion constants
+    SEASON_WARMTH_PROFILES = {
+        "summer": {"target": 8, "min": 3, "max": 13, "tolerance": 8},
+        "spring": {"target": 12, "min": 6, "max": 18, "tolerance": 9},
+        "autumn": {"target": 16, "min": 8, "max": 22, "tolerance": 9},
+        "winter": {"target": 22, "min": 14, "max": 32, "tolerance": 10},
+    }
+    OCCASION_PROFILES = {
+        "university": {"formality_min": 2, "formality_max": 6},
+        "work_casual": {"formality_min": 4, "formality_max": 7},
+        "evening": {"formality_min": 5, "formality_max": 8},
+        "event": {"formality_min": 6, "formality_max": 10},
+    }
+    SEASON_WEIGHT = 0.10
+    OCCASION_TAG_WEIGHT = 0.08
+    OCCASION_FORMALITY_WEIGHT = 0.06
 
     @classmethod
     def load_weights(cls, weights_dict: dict):
@@ -335,27 +353,149 @@ class OutfitGenerator:
             # >7 days: no penalty
         return penalty
     
+    # ========== Phase 3 helper methods ==========
     @staticmethod
-    def score_calculator(outfit, db) -> float:
-        color_weight = OutfitGenerator.weights['color_weight']
-        pattern_weight = OutfitGenerator.weights['pattern_weight']
-        formality_weight = OutfitGenerator.weights['formality_weight']
+    def parse_tags(tags_str: str) -> List[str]:
+        """Split comma-separated tags, trim, lowercase, ignore empty."""
+        if not tags_str:
+            return []
+        return [tag.strip().lower() for tag in tags_str.split(',') if tag.strip()]
+
+    @staticmethod
+    def infer_current_season() -> str:
+        month = datetime.now().month
+        if month in (12, 1, 2):
+            return "winter"
+        elif month in (3, 4, 5):
+            return "spring"
+        elif month in (6, 7, 8):
+            return "summer"
+        else:  # 9,10,11
+            return "autumn"
+
+    @classmethod
+    def resolve_season(cls, season: Optional[str]) -> Optional[str]:
+        """Return effective season name or None. Handles 'auto' and None."""
+        if season is None or season == "none":
+            return None
+        if season == "auto":
+            return cls.infer_current_season()
+        if season in cls.SEASON_WARMTH_PROFILES:
+            return season
+        raise ValueError(f"Invalid season: {season}. Allowed: none, auto, spring, summer, autumn, winter")
+    
+    @classmethod
+    def resolve_occasion(cls, occasion: Optional[str]) -> Optional[str]:
+        """Return effective occasion name or None."""
+        if occasion is None or occasion == "none":
+            return None
+        if occasion in cls.OCCASION_PROFILES:
+            return occasion
+        raise ValueError(
+            f"Invalid occasion: {occasion}. "
+            "Allowed: none, university, work_casual, evening, event"
+        )
+
+    @staticmethod
+    def get_outfit_garments(outfit, db) -> List[Any]:
+        """Return list of garment dicts for the outfit."""
+        garments = [
+            db.get_garment(outfit.shoes),
+            db.get_garment(outfit.bottom),
+            db.get_garment(outfit.base_top)
+        ]
+        if outfit.mid_top:
+            garments.append(db.get_garment(outfit.mid_top))
+        if outfit.outerwear:
+            garments.append(db.get_garment(outfit.outerwear))
+        return garments
+
+    @staticmethod
+    def calculate_total_warmth(outfit, db) -> int:
+        return sum(g['warmth'] for g in OutfitGenerator.get_outfit_garments(outfit, db))
+
+    @classmethod
+    def is_seasonally_valid(cls, outfit, db, season: Optional[str]) -> bool:
+        """Hard season filter: total_warmth within [min, max] of resolved season."""
+        resolved = cls.resolve_season(season)
+        if resolved is None:
+            return True
+        profile = cls.SEASON_WARMTH_PROFILES[resolved]
+        total_warmth = cls.calculate_total_warmth(outfit, db)
+        return profile["min"] <= total_warmth <= profile["max"]
+
+    @classmethod
+    def calculate_season_adjustment(cls, outfit, db, season: Optional[str]) -> float:
+        """Soft penalty: (season_score - 1.0) * SEASON_WEIGHT"""
+        resolved = cls.resolve_season(season)
+        if resolved is None:
+            return 0.0
+        profile = cls.SEASON_WARMTH_PROFILES[resolved]
+        total_warmth = cls.calculate_total_warmth(outfit, db)
+        # inside hard bounds is guaranteed by is_seasonally_valid call before scoring
+        distance = abs(total_warmth - profile["target"])
+        season_score = max(0.0, 1.0 - distance / profile["tolerance"])
+        return (season_score - 1.0) * cls.SEASON_WEIGHT
+
+    @classmethod
+    def calculate_occasion_tag_adjustment(cls, outfit, db, occasion: Optional[str]) -> float:
+        """Soft penalty based on proportion of garments matching occasion in occasion_tags."""
+        occasion = cls.resolve_occasion(occasion)
+        if occasion is None:
+            return 0.0
+        garments = cls.get_outfit_garments(outfit, db)
+        if not garments:
+            return 0.0
+        match_count = 0
+        for g in garments:
+            tags = cls.parse_tags(g['occasion_tags'])
+            if occasion in tags:
+                match_count += 1
+        match_score = match_count / len(garments)
+        return (match_score - 1.0) * cls.OCCASION_TAG_WEIGHT
+
+    @classmethod
+    def calculate_occasion_formality_adjustment(cls, outfit, db, occasion: Optional[str]) -> float:
+        """Soft penalty if average formality is outside the occasion's recommended range."""
+        occasion = cls.resolve_occasion(occasion)
+        if occasion is None:
+            return 0.0
+        profile = cls.OCCASION_PROFILES[occasion]
+        garments = cls.get_outfit_garments(outfit, db)
+        avg_formality = sum(g['formality'] for g in garments) / len(garments)
+        min_ok = profile["formality_min"]
+        max_ok = profile["formality_max"]
+        if min_ok <= avg_formality <= max_ok:
+            return 0.0
+        if avg_formality < min_ok:
+            distance = min_ok - avg_formality
+        else:
+            distance = avg_formality - max_ok
+        # clamp distance effect to max 1.0 (5 points)
+        normalized = min(1.0, distance / 5.0)
+        return -normalized * cls.OCCASION_FORMALITY_WEIGHT
+    
+    @classmethod
+    def score_calculator(cls, outfit, db, season: Optional[str] = None, occasion: Optional[str] = None) -> float:
+        color_weight = cls.weights['color_weight']
+        pattern_weight = cls.weights['pattern_weight']
+        formality_weight = cls.weights['formality_weight']
         # Caso 1: shoes + bottom + base_top
         if outfit.mid_top is None and outfit.outerwear is None:
             shoes = db.get_garment(outfit.shoes)
             bottom = db.get_garment(outfit.bottom)
             base_top = db.get_garment(outfit.base_top)
-            lab_shoes = OutfitGenerator.extract_lab(shoes)
-            lab_bottom = OutfitGenerator.extract_lab(bottom)
-            lab_base_top = OutfitGenerator.extract_lab(base_top)
-            is_shoes_neutral = OutfitGenerator.is_neutral_color(shoes)
-            is_bottom_neutral = OutfitGenerator.is_neutral_color(bottom)
-            is_base_top_neutral = OutfitGenerator.is_neutral_color(base_top)
+            lab_shoes = cls.extract_lab(shoes)
+            lab_bottom = cls.extract_lab(bottom)
+            lab_base_top = cls.extract_lab(base_top)
+            is_shoes_neutral = cls.is_neutral_color(shoes)
+            is_bottom_neutral = cls.is_neutral_color(bottom)
+            is_base_top_neutral = cls.is_neutral_color(base_top)
 
-            distance_base_top_to_bottom = OutfitGenerator.calculate_lab_distance(lab_bottom, lab_base_top)
-            score_base_top_to_bottom = OutfitGenerator.score_color_pair(distance_base_top_to_bottom, is_base_top_neutral, is_bottom_neutral)
-            distance_base_top_to_shoes = OutfitGenerator.calculate_lab_distance(lab_base_top, lab_shoes)
-            score_base_top_to_shoes = OutfitGenerator.score_color_pair(distance_base_top_to_shoes, is_base_top_neutral, is_shoes_neutral)
+            distance_base_top_to_bottom = cls.calculate_lab_distance(lab_bottom, lab_base_top)
+            score_base_top_to_bottom = cls.score_color_pair(distance_base_top_to_bottom, is_base_top_neutral, is_bottom_neutral)
+            distance_base_top_to_shoes = cls.calculate_lab_distance(lab_base_top, lab_shoes)
+            score_base_top_to_shoes = cls.score_color_pair(distance_base_top_to_shoes, is_base_top_neutral, is_shoes_neutral)
 
             color_score = (score_base_top_to_bottom*1.0 + score_base_top_to_shoes*0.8)/1.8
         # Caso 2: shoes + bottom + base_top + mid_top
@@ -364,21 +504,21 @@ class OutfitGenerator:
             bottom = db.get_garment(outfit.bottom)
             base_top = db.get_garment(outfit.base_top)
             mid_top = db.get_garment(outfit.mid_top)
-            lab_shoes = OutfitGenerator.extract_lab(shoes)
-            lab_bottom = OutfitGenerator.extract_lab(bottom)
-            lab_base_top = OutfitGenerator.extract_lab(base_top)
-            lab_mid_top = OutfitGenerator.extract_lab(mid_top)
-            is_shoes_neutral = OutfitGenerator.is_neutral_color(shoes)
-            is_bottom_neutral = OutfitGenerator.is_neutral_color(bottom)
-            is_base_top_neutral = OutfitGenerator.is_neutral_color(base_top)
-            is_mid_top_neutral = OutfitGenerator.is_neutral_color(mid_top)
+            lab_shoes = cls.extract_lab(shoes)
+            lab_bottom = cls.extract_lab(bottom)
+            lab_base_top = cls.extract_lab(base_top)
+            lab_mid_top = cls.extract_lab(mid_top)
+            is_shoes_neutral = cls.is_neutral_color(shoes)
+            is_bottom_neutral = cls.is_neutral_color(bottom)
+            is_base_top_neutral = cls.is_neutral_color(base_top)
+            is_mid_top_neutral = cls.is_neutral_color(mid_top)
 
-            distance_mid_top_to_bottom = OutfitGenerator.calculate_lab_distance(lab_mid_top, lab_bottom)
-            score_mid_top_to_bottom = OutfitGenerator.score_color_pair(distance_mid_top_to_bottom, is_mid_top_neutral, is_bottom_neutral)
-            distance_mid_top_to_shoes = OutfitGenerator.calculate_lab_distance(lab_mid_top, lab_shoes)
-            score_mid_top_to_shoes = OutfitGenerator.score_color_pair(distance_mid_top_to_shoes, is_mid_top_neutral, is_shoes_neutral)
-            distance_mid_top_to_base_top = OutfitGenerator.calculate_lab_distance(lab_mid_top, lab_base_top)
-            score_mid_top_to_base_top = OutfitGenerator.score_color_pair(distance_mid_top_to_base_top, is_mid_top_neutral, is_base_top_neutral)
+            distance_mid_top_to_bottom = cls.calculate_lab_distance(lab_mid_top, lab_bottom)
+            score_mid_top_to_bottom = cls.score_color_pair(distance_mid_top_to_bottom, is_mid_top_neutral, is_bottom_neutral)
+            distance_mid_top_to_shoes = cls.calculate_lab_distance(lab_mid_top, lab_shoes)
+            score_mid_top_to_shoes = cls.score_color_pair(distance_mid_top_to_shoes, is_mid_top_neutral, is_shoes_neutral)
+            distance_mid_top_to_base_top = cls.calculate_lab_distance(lab_mid_top, lab_base_top)
+            score_mid_top_to_base_top = cls.score_color_pair(distance_mid_top_to_base_top, is_mid_top_neutral, is_base_top_neutral)
             
             color_score = (score_mid_top_to_bottom*1.0 + score_mid_top_to_shoes*0.8 + score_mid_top_to_base_top*0.5)/(1.0+0.8+0.5)
         # Caso 3: shoes + bottom + base_top + outerwear
@@ -387,25 +527,25 @@ class OutfitGenerator:
             bottom = db.get_garment(outfit.bottom)
             base_top = db.get_garment(outfit.base_top)
             outerwear = db.get_garment(outfit.outerwear)
-            lab_shoes = OutfitGenerator.extract_lab(shoes)
-            lab_bottom = OutfitGenerator.extract_lab(bottom)
-            lab_base_top = OutfitGenerator.extract_lab(base_top)
-            lab_outerwear = OutfitGenerator.extract_lab(outerwear)
-            is_shoes_neutral = OutfitGenerator.is_neutral_color(shoes)
-            is_bottom_neutral = OutfitGenerator.is_neutral_color(bottom)
-            is_base_top_neutral = OutfitGenerator.is_neutral_color(base_top)
-            is_outerwear_neutral = OutfitGenerator.is_neutral_color(outerwear)
+            lab_shoes = cls.extract_lab(shoes)
+            lab_bottom = cls.extract_lab(bottom)
+            lab_base_top = cls.extract_lab(base_top)
+            lab_outerwear = cls.extract_lab(outerwear)
+            is_shoes_neutral = cls.is_neutral_color(shoes)
+            is_bottom_neutral = cls.is_neutral_color(bottom)
+            is_base_top_neutral = cls.is_neutral_color(base_top)
+            is_outerwear_neutral = cls.is_neutral_color(outerwear)
 
-            distance_base_to_bottom = OutfitGenerator.calculate_lab_distance(lab_base_top, lab_bottom)
-            score_base_top_to_bottom = OutfitGenerator.score_color_pair(distance_base_to_bottom, is_base_top_neutral, is_bottom_neutral)
-            distance_base_to_shoes = OutfitGenerator.calculate_lab_distance(lab_base_top, lab_shoes)
-            score_base_top_to_shoes = OutfitGenerator.score_color_pair(distance_base_to_shoes, is_base_top_neutral, is_shoes_neutral)
-            distance_outerwear_to_bottom = OutfitGenerator.calculate_lab_distance(lab_outerwear, lab_bottom)
-            score_outerwear_to_bottom = OutfitGenerator.score_color_pair(distance_outerwear_to_bottom, is_outerwear_neutral, is_bottom_neutral)
-            distance_outerwear_to_shoes = OutfitGenerator.calculate_lab_distance(lab_outerwear, lab_shoes)
-            score_outerwear_to_shoes = OutfitGenerator.score_color_pair(distance_outerwear_to_shoes, is_outerwear_neutral, is_shoes_neutral)
-            distance_outerwear_to_base_top = OutfitGenerator.calculate_lab_distance(lab_outerwear, lab_base_top)
-            score_outerwear_to_base_top = OutfitGenerator.score_color_pair(distance_outerwear_to_base_top, is_outerwear_neutral, is_base_top_neutral)
+            distance_base_to_bottom = cls.calculate_lab_distance(lab_base_top, lab_bottom)
+            score_base_top_to_bottom = cls.score_color_pair(distance_base_to_bottom, is_base_top_neutral, is_bottom_neutral)
+            distance_base_to_shoes = cls.calculate_lab_distance(lab_base_top, lab_shoes)
+            score_base_top_to_shoes = cls.score_color_pair(distance_base_to_shoes, is_base_top_neutral, is_shoes_neutral)
+            distance_outerwear_to_bottom = cls.calculate_lab_distance(lab_outerwear, lab_bottom)
+            score_outerwear_to_bottom = cls.score_color_pair(distance_outerwear_to_bottom, is_outerwear_neutral, is_bottom_neutral)
+            distance_outerwear_to_shoes = cls.calculate_lab_distance(lab_outerwear, lab_shoes)
+            score_outerwear_to_shoes = cls.score_color_pair(distance_outerwear_to_shoes, is_outerwear_neutral, is_shoes_neutral)
+            distance_outerwear_to_base_top = cls.calculate_lab_distance(lab_outerwear, lab_base_top)
+            score_outerwear_to_base_top = cls.score_color_pair(distance_outerwear_to_base_top, is_outerwear_neutral, is_base_top_neutral)
             
             color_score = (score_base_top_to_bottom*1.0 + score_base_top_to_shoes*0.8 + score_outerwear_to_bottom*0.4 + score_outerwear_to_shoes*0.3 + score_outerwear_to_base_top*0.3)/(1.0+0.8+0.4+0.3+0.3)
         # Caso 4: shoes + bottom + base_top + mid_top + outerwear
@@ -415,74 +555,77 @@ class OutfitGenerator:
             base_top = db.get_garment(outfit.base_top)
             mid_top = db.get_garment(outfit.mid_top)
             outerwear = db.get_garment(outfit.outerwear)
-            lab_shoes = OutfitGenerator.extract_lab(shoes)
-            lab_bottom = OutfitGenerator.extract_lab(bottom)
-            lab_base_top = OutfitGenerator.extract_lab(base_top)
-            lab_mid_top = OutfitGenerator.extract_lab(mid_top)
-            lab_outerwear = OutfitGenerator.extract_lab(outerwear)
-            is_shoes_neutral = OutfitGenerator.is_neutral_color(shoes)
-            is_bottom_neutral = OutfitGenerator.is_neutral_color(bottom)
-            is_base_top_neutral = OutfitGenerator.is_neutral_color(base_top)
-            is_mid_top_neutral = OutfitGenerator.is_neutral_color(mid_top)
-            is_outerwear_neutral = OutfitGenerator.is_neutral_color(outerwear)
+            lab_shoes = cls.extract_lab(shoes)
+            lab_bottom = cls.extract_lab(bottom)
+            lab_base_top = cls.extract_lab(base_top)
+            lab_mid_top = cls.extract_lab(mid_top)
+            lab_outerwear = cls.extract_lab(outerwear)
+            is_shoes_neutral = cls.is_neutral_color(shoes)
+            is_bottom_neutral = cls.is_neutral_color(bottom)
+            is_base_top_neutral = cls.is_neutral_color(base_top)
+            is_mid_top_neutral = cls.is_neutral_color(mid_top)
+            is_outerwear_neutral = cls.is_neutral_color(outerwear)
 
-            distance_mid_top_to_bottom = OutfitGenerator.calculate_lab_distance(lab_mid_top, lab_bottom)
-            score_mid_top_to_bottom = OutfitGenerator.score_color_pair(distance_mid_top_to_bottom, is_mid_top_neutral, is_bottom_neutral)
-            distance_mid_top_to_shoes = OutfitGenerator.calculate_lab_distance(lab_mid_top, lab_shoes)
-            score_mid_top_to_shoes = OutfitGenerator.score_color_pair(distance_mid_top_to_shoes, is_mid_top_neutral, is_shoes_neutral)
-            distance_mid_top_to_base_top = OutfitGenerator.calculate_lab_distance(lab_mid_top, lab_base_top)
-            score_mid_top_to_base_top = OutfitGenerator.score_color_pair(distance_mid_top_to_base_top, is_mid_top_neutral, is_base_top_neutral)
-            distance_outerwear_to_bottom = OutfitGenerator.calculate_lab_distance(lab_outerwear, lab_bottom)
-            score_outerwear_to_bottom = OutfitGenerator.score_color_pair(distance_outerwear_to_bottom, is_outerwear_neutral, is_bottom_neutral)
-            distance_outerwear_to_shoes = OutfitGenerator.calculate_lab_distance(lab_outerwear, lab_shoes)
-            score_outerwear_to_shoes = OutfitGenerator.score_color_pair(distance_outerwear_to_shoes, is_outerwear_neutral, is_shoes_neutral)
-            distance_outerwear_to_mid_top = OutfitGenerator.calculate_lab_distance(lab_outerwear, lab_mid_top)
-            score_outerwear_to_mid_top = OutfitGenerator.score_color_pair(distance_outerwear_to_mid_top, is_outerwear_neutral, is_mid_top_neutral)
+            distance_mid_top_to_bottom = cls.calculate_lab_distance(lab_mid_top, lab_bottom)
+            score_mid_top_to_bottom = cls.score_color_pair(distance_mid_top_to_bottom, is_mid_top_neutral, is_bottom_neutral)
+            distance_mid_top_to_shoes = cls.calculate_lab_distance(lab_mid_top, lab_shoes)
+            score_mid_top_to_shoes = cls.score_color_pair(distance_mid_top_to_shoes, is_mid_top_neutral, is_shoes_neutral)
+            distance_mid_top_to_base_top = cls.calculate_lab_distance(lab_mid_top, lab_base_top)
+            score_mid_top_to_base_top = cls.score_color_pair(distance_mid_top_to_base_top, is_mid_top_neutral, is_base_top_neutral)
+            distance_outerwear_to_bottom = cls.calculate_lab_distance(lab_outerwear, lab_bottom)
+            score_outerwear_to_bottom = cls.score_color_pair(distance_outerwear_to_bottom, is_outerwear_neutral, is_bottom_neutral)
+            distance_outerwear_to_shoes = cls.calculate_lab_distance(lab_outerwear, lab_shoes)
+            score_outerwear_to_shoes = cls.score_color_pair(distance_outerwear_to_shoes, is_outerwear_neutral, is_shoes_neutral)
+            distance_outerwear_to_mid_top = cls.calculate_lab_distance(lab_outerwear, lab_mid_top)
+            score_outerwear_to_mid_top = cls.score_color_pair(distance_outerwear_to_mid_top, is_outerwear_neutral, is_mid_top_neutral)
             
             color_score = (score_mid_top_to_bottom*1.0 + score_mid_top_to_shoes*0.8 + score_mid_top_to_base_top*0.5 + score_outerwear_to_bottom*0.3 + score_outerwear_to_shoes*0.3 + score_outerwear_to_mid_top*0.3)/(1.0+0.8+0.5+0.3+0.3+0.3)
         
-        pattern_score = OutfitGenerator.calculate_pattern_coherence(outfit, db)
-        coherence_score = OutfitGenerator.calculate_formality_alignment(outfit, db)
+        pattern_score = cls.calculate_pattern_coherence(outfit, db)
+        coherence_score = cls.calculate_formality_alignment(outfit, db)
 
-        target_score = OutfitGenerator.calculate_target_formality_score(outfit, db)
+        target_score = cls.calculate_target_formality_score(outfit, db)
 
         # Combina coherence and target preference (70% coherence, 30% target)
         formality_score = 0.7 * coherence_score + 0.3 * target_score
         
-        neutral_penalty = OutfitGenerator.calculate_neutral_penalty(outfit, db)
-        color_bonus = OutfitGenerator.calculate_color_diversity_bonus(outfit, db)
-        simplicity_bonus = OutfitGenerator.calculate_simplicity_bonus(outfit)
-        pair_penalties = OutfitGenerator.calculate_pair_penalties(outfit, db)
-        recently_worn_penalty = OutfitGenerator.calculate_recently_worn_penalty(outfit, db)
+        neutral_penalty = cls.calculate_neutral_penalty(outfit, db)
+        color_bonus = cls.calculate_color_diversity_bonus(outfit, db)
+        simplicity_bonus = cls.calculate_simplicity_bonus(outfit)
+        pair_penalties = cls.calculate_pair_penalties(outfit, db)
+        recently_worn_penalty = cls.calculate_recently_worn_penalty(outfit, db)
         
+        # Phase 3 adjustments
+        season_adjustment = cls.calculate_season_adjustment(outfit, db, season)
+        occasion_tag_adjustment = cls.calculate_occasion_tag_adjustment(outfit, db, occasion)
+        occasion_formality_adjustment = cls.calculate_occasion_formality_adjustment(outfit, db, occasion)
+
         total_score = (color_score * color_weight + 
                        pattern_score * pattern_weight + 
                        formality_score * formality_weight + 
                        neutral_penalty + color_bonus + simplicity_bonus + 
-                       pair_penalties + recently_worn_penalty)
+                       pair_penalties + recently_worn_penalty +
+                       season_adjustment + occasion_tag_adjustment + occasion_formality_adjustment)
 
         return max(0.0, min(1.0, total_score))
     
-    @staticmethod
-    def debug_score_breakdown(outfit, db):
+    @classmethod
+    def debug_score_breakdown(cls, outfit, db, season: Optional[str] = None, occasion: Optional[str] = None):
         """Mostra i dettagli dello scoring"""
 
         print("--- Garment Details ---")
         shoes = db.get_garment(outfit.shoes)
         bottom = db.get_garment(outfit.bottom)
         base = db.get_garment(outfit.base_top)
-
-        print(f"Shoes: {shoes['name']} (neutral: {OutfitGenerator.is_neutral_color(shoes)}, formality: {shoes['formality']}, pattern: {shoes['pattern']})")
-        print(f"Bottom: {bottom['name']} (neutral: {OutfitGenerator.is_neutral_color(bottom)}, formality: {bottom['formality']}, pattern: {bottom['pattern']})")
-        print(f"Base: {base['name']} (neutral: {OutfitGenerator.is_neutral_color(base)}, formality: {base['formality']}, pattern: {base['pattern']})")
-
+        print(f"Shoes: {shoes['name']} (neutral: {cls.is_neutral_color(shoes)}, formality: {shoes['formality']}, pattern: {shoes['pattern']})")
+        print(f"Bottom: {bottom['name']} (neutral: {cls.is_neutral_color(bottom)}, formality: {bottom['formality']}, pattern: {bottom['pattern']})")
+        print(f"Base: {base['name']} (neutral: {cls.is_neutral_color(base)}, formality: {base['formality']}, pattern: {base['pattern']})")
         if outfit.mid_top:
             mid = db.get_garment(outfit.mid_top)
-            print(f"Mid: {mid['name']} (neutral: {OutfitGenerator.is_neutral_color(mid)}, formality: {mid['formality']}, pattern: {mid['pattern']})")
-    
+            print(f"Mid: {mid['name']} (neutral: {cls.is_neutral_color(mid)}, formality: {mid['formality']}, pattern: {mid['pattern']})")
         if outfit.outerwear:
             outer = db.get_garment(outfit.outerwear)
-            print(f"Outer: {outer['name']} (neutral: {OutfitGenerator.is_neutral_color(outer)}, formality: {outer['formality']}, pattern: {outer['pattern']})")
+            print(f"Outer: {outer['name']} (neutral: {cls.is_neutral_color(outer)}, formality: {outer['formality']}, pattern: {outer['pattern']})")
         
         # === LAYER COUNT ===
         layer_count = 3
@@ -497,14 +640,14 @@ class OutfitGenerator:
     
         if outfit.mid_top:
             mid = db.get_garment(outfit.mid_top)
-            lab_mid = OutfitGenerator.extract_lab(mid)
-            lab_bottom = OutfitGenerator.extract_lab(bottom)
-            lab_shoes = OutfitGenerator.extract_lab(shoes)
-            lab_base = OutfitGenerator.extract_lab(base)
+            lab_mid = cls.extract_lab(mid)
+            lab_bottom = cls.extract_lab(bottom)
+            lab_shoes = cls.extract_lab(shoes)
+            lab_base = cls.extract_lab(base)
 
-            dist_mid_bottom = OutfitGenerator.calculate_lab_distance(lab_mid, lab_bottom)
-            dist_mid_shoes = OutfitGenerator.calculate_lab_distance(lab_mid, lab_shoes)
-            dist_mid_base = OutfitGenerator.calculate_lab_distance(lab_mid, lab_base)
+            dist_mid_bottom = cls.calculate_lab_distance(lab_mid, lab_bottom)
+            dist_mid_shoes = cls.calculate_lab_distance(lab_mid, lab_shoes)
+            dist_mid_base = cls.calculate_lab_distance(lab_mid, lab_base)
 
             print(f"Mid → Bottom: {dist_mid_bottom:.1f}")
             print(f"Mid → Shoes: {dist_mid_shoes:.1f}")
@@ -512,32 +655,32 @@ class OutfitGenerator:
 
             if outfit.outerwear:
                 outer = db.get_garment(outfit.outerwear)
-                lab_outer = OutfitGenerator.extract_lab(outer)
-                dist_outer_bottom = OutfitGenerator.calculate_lab_distance(lab_outer, lab_bottom)
-                dist_outer_shoes = OutfitGenerator.calculate_lab_distance(lab_outer, lab_shoes)
-                dist_outer_mid = OutfitGenerator.calculate_lab_distance(lab_outer, lab_mid)
+                lab_outer = cls.extract_lab(outer)
+                dist_outer_bottom = cls.calculate_lab_distance(lab_outer, lab_bottom)
+                dist_outer_shoes = cls.calculate_lab_distance(lab_outer, lab_shoes)
+                dist_outer_mid = cls.calculate_lab_distance(lab_outer, lab_mid)
 
                 print(f"Outer → Bottom: {dist_outer_bottom:.1f}")
                 print(f"Outer → Shoes: {dist_outer_shoes:.1f}")
                 print(f"Outer → Mid: {dist_outer_mid:.1f}")
         else:
             # Solo base (no mid)
-            lab_base = OutfitGenerator.extract_lab(base)
-            lab_bottom = OutfitGenerator.extract_lab(bottom)
-            lab_shoes = OutfitGenerator.extract_lab(shoes)
+            lab_base = cls.extract_lab(base)
+            lab_bottom = cls.extract_lab(bottom)
+            lab_shoes = cls.extract_lab(shoes)
 
-            dist_base_bottom = OutfitGenerator.calculate_lab_distance(lab_base, lab_bottom)
-            dist_base_shoes = OutfitGenerator.calculate_lab_distance(lab_base, lab_shoes)
+            dist_base_bottom = cls.calculate_lab_distance(lab_base, lab_bottom)
+            dist_base_shoes = cls.calculate_lab_distance(lab_base, lab_shoes)
 
             print(f"Base → Bottom: {dist_base_bottom:.1f}")
             print(f"Base → Shoes: {dist_base_shoes:.1f}")
 
             if outfit.outerwear:
                 outer = db.get_garment(outfit.outerwear)
-                lab_outer = OutfitGenerator.extract_lab(outer)
-                dist_outer_bottom = OutfitGenerator.calculate_lab_distance(lab_outer, lab_bottom)
-                dist_outer_shoes = OutfitGenerator.calculate_lab_distance(lab_outer, lab_shoes)
-                dist_outer_base = OutfitGenerator.calculate_lab_distance(lab_outer, lab_base)
+                lab_outer = cls.extract_lab(outer)
+                dist_outer_bottom = cls.calculate_lab_distance(lab_outer, lab_bottom)
+                dist_outer_shoes = cls.calculate_lab_distance(lab_outer, lab_shoes)
+                dist_outer_base = cls.calculate_lab_distance(lab_outer, lab_base)
 
                 print(f"Outer → Bottom: {dist_outer_bottom:.1f}")
                 print(f"Outer → Shoes: {dist_outer_shoes:.1f}")
@@ -547,12 +690,12 @@ class OutfitGenerator:
         print("\n--- Score Components ---")
 
         # Ricalcola i componenti individuali (potrebbero essere già calcolati, ma ricalicoliamoli per debug)
-        pattern_score = OutfitGenerator.calculate_pattern_coherence(outfit, db)
-        formality_score = OutfitGenerator.calculate_formality_alignment(outfit, db)
-        neutral_penalty = OutfitGenerator.calculate_neutral_penalty(outfit, db)
-        color_bonus = OutfitGenerator.calculate_color_diversity_bonus(outfit, db)
-        simplicity_bonus = OutfitGenerator.calculate_simplicity_bonus(outfit)
-        pair_penalties = OutfitGenerator.calculate_pair_penalties(outfit, db)
+        pattern_score = cls.calculate_pattern_coherence(outfit, db)
+        formality_score = cls.calculate_formality_alignment(outfit, db)
+        neutral_penalty = cls.calculate_neutral_penalty(outfit, db)
+        color_bonus = cls.calculate_color_diversity_bonus(outfit, db)
+        simplicity_bonus = cls.calculate_simplicity_bonus(outfit)
+        pair_penalties = cls.calculate_pair_penalties(outfit, db)
 
         print(f"Pattern coherence: {pattern_score:.3f}")
         print(f"Formality alignment: {formality_score:.3f}")
@@ -586,17 +729,35 @@ class OutfitGenerator:
             visible_top_name = "Base"
 
         print(f"Visible top: {visible_top_name}")
-        print(f"  Shoes pattern weight: {OutfitGenerator.get_pattern_weight(shoes['pattern'])}")
-        print(f"  Bottom pattern weight: {OutfitGenerator.get_pattern_weight(bottom['pattern'])}")
-        print(f"  {visible_top_name} pattern weight: {OutfitGenerator.get_pattern_weight(visible_top['pattern'])}")
+        print(f"  Shoes pattern weight: {cls.get_pattern_weight(shoes['pattern'])}")
+        print(f"  Bottom pattern weight: {cls.get_pattern_weight(bottom['pattern'])}")
+        print(f"  {visible_top_name} pattern weight: {cls.get_pattern_weight(visible_top['pattern'])}")
 
+        print("\n--- Phase 3 Context Adjustments ---")
+        if season is not None and season != "none":
+            resolved = cls.resolve_season(season)
+            if resolved:
+                total_warmth = cls.calculate_total_warmth(outfit, db)
+                profile = cls.SEASON_WARMTH_PROFILES[resolved]
+                print(f"Season: {resolved} | total warmth: {total_warmth} (target {profile['target']}, tolerance {profile['tolerance']})")
+                season_adj = cls.calculate_season_adjustment(outfit, db, season)
+                print(f"Season adjustment: {season_adj:+.3f}")
+        else:
+            print("Season context: none")
+
+        if occasion is not None and occasion != "none":
+            occ_adj_tag = cls.calculate_occasion_tag_adjustment(outfit, db, occasion)
+            occ_adj_form = cls.calculate_occasion_formality_adjustment(outfit, db, occasion)
+            print(f"Occasion: {occasion} | tag adjustment: {occ_adj_tag:+.3f}, formality adjustment: {occ_adj_form:+.3f}")
+        else:
+            print("Occasion context: none")
         # === FINAL SCORE ===
         print(f"\n--- Final Score: {outfit.score:.3f} ---")
 
-    @staticmethod
-    def generate(shoes_list, bottoms_list, base_tops_list, mid_tops_list, outerwear_list, db, count: int = 1, top_pool: int = 150) -> list[Outfit]:
+    @classmethod
+    def generate(cls, shoes_list, bottoms_list, base_tops_list, mid_tops_list, outerwear_list, db, count: int = 1, top_pool: int = 150, season: Optional[str] = None, occasion: Optional[str] = None) -> list[Outfit]:
         # Use adaptive formality threshold for hard filtering
-        formality_threshold = OutfitGenerator.weights.get('formality_threshold', 4)
+        formality_threshold = cls.weights.get('formality_threshold', 4)
         mid_options = [None] + mid_tops_list
         outer_options = [None] + outerwear_list
 
@@ -624,7 +785,11 @@ class OutfitGenerator:
                 mid_top=mid['id'] if mid else None,
                 outerwear=outer['id'] if outer else None
             )
-            outfit.score = OutfitGenerator.score_calculator(outfit, db)
+
+            if not cls.is_seasonally_valid(outfit, db, season):
+                continue
+
+            outfit.score = cls.score_calculator(outfit, db, season=season, occasion=occasion)
             valid_outfits.append(outfit)
         
         if not valid_outfits:
@@ -637,9 +802,9 @@ class OutfitGenerator:
         print(f"Outfit validi generati: {len(valid_outfits)}")
 
         # Conta quante volte ogni capo appare
-        from collections import Counter
-        mid_usage = Counter(o.mid_top for o in valid_outfits if o.mid_top)
-        print("Uso mid_tops:", mid_usage)
+        #from collections import Counter
+        #mid_usage = Counter(o.mid_top for o in valid_outfits if o.mid_top)
+        #print("Uso mid_tops:", mid_usage)
         
         valid_outfits.sort(key=lambda x: x.score, reverse=True)
 
