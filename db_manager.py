@@ -401,6 +401,65 @@ class DB_Manager():
         """Close connection when finished"""
         if self.conn:
             self.conn.close()
+    
+    def list_garments_full(self, show_inactive: bool = True) -> list:
+        """Return all garment rows (all columns) ordered by active DESC, category, name."""
+        cursor = self.conn.cursor()
+        if show_inactive:
+            query = "SELECT * FROM garment ORDER BY active DESC, category, name"
+        else:
+            query = "SELECT * FROM garment WHERE active = 1 ORDER BY category, name"
+        cursor.execute(query)
+        return cursor.fetchall()
+
+    # ===== Metodi per reporting / Learning page =====
+    def count_feedback(self) -> int:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM feedback")
+        return cursor.fetchone()[0]
+
+    def count_feedback_by_verdict(self, verdict: int) -> int:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM feedback WHERE verdict = ?", (verdict,))
+        return cursor.fetchone()[0]
+
+    def count_pair_penalties(self) -> int:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM pair_penalties WHERE penalty_score < 0")
+        return cursor.fetchone()[0]
+
+    def clear_pair_penalties(self):
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM pair_penalties")
+        self.conn.commit()
+
+    def count_outfit_history(self) -> int:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM outfit_history")
+        return cursor.fetchone()[0]
+
+    def count_garments_by_active(self, active: bool) -> int:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM garment WHERE active = ?", (1 if active else 0,))
+        return cursor.fetchone()[0]
+
+    def list_top_pair_penalties(self, limit: int = 5) -> list:
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT
+                pp.garment_id_1,
+                pp.garment_id_2,
+                g1.name AS garment_1_name,
+                g2.name AS garment_2_name,
+                pp.penalty_score
+            FROM pair_penalties pp
+            JOIN garment g1 ON g1.id = pp.garment_id_1
+            JOIN garment g2 ON g2.id = pp.garment_id_2
+            WHERE pp.penalty_score < 0
+            ORDER BY pp.penalty_score ASC
+            LIMIT ?
+        ''', (limit,))
+        return [dict(row) for row in cursor.fetchall()]
 
 class WeightsManager:
     # Bounds for penalties
