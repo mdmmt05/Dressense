@@ -125,8 +125,32 @@ class DB_Manager():
                 FOREIGN KEY (outerwear_id) REFERENCES garment(id)
             )
         ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS ui_preferences (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        ''')
         self.conn.commit()
     
+    def get_ui_preference(self, key: str, default=None):
+        """Retrieve a UI preference value by key."""
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT value FROM ui_preferences WHERE key = ?', (key,))
+        row = cursor.fetchone()
+        if row is None:
+            return default
+        return row[0]
+
+    def set_ui_preference(self, key: str, value: str) -> None:
+        """Persist a UI preference key/value pair."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            'INSERT OR REPLACE INTO ui_preferences (key, value) VALUES (?, ?)',
+            (key, str(value))
+        )
+        self.conn.commit()
+
     def _ensure_default_weights(self) -> None:
         """Insert any missing weight keys without overwriting existing values."""
         defaults = [

@@ -186,6 +186,24 @@ class DressenseService:
             "inactive_garment_count": self.db.count_garments_by_active(False),
         }
 
+    # ===== UI Preferences =====
+    def get_ui_preferences(self) -> dict:
+        dark_mode = self.db.get_ui_preference('dark_mode', 'false')
+        advanced_mode = self.db.get_ui_preference('advanced_mode', 'false')
+        return {
+            'dark_mode': dark_mode == 'true',
+            'advanced_mode': advanced_mode == 'true',
+        }
+
+    def set_ui_preference(self, key: str, value) -> None:
+        self.db.set_ui_preference(key, 'true' if value else 'false')
+
+    def set_dark_mode(self, enabled: bool) -> None:
+        self.set_ui_preference('dark_mode', enabled)
+
+    def set_advanced_mode(self, enabled: bool) -> None:
+        self.set_ui_preference('advanced_mode', enabled)
+
     def reset_learning(self) -> None:
         self.weights_manager.reset_all_weights()
         self.db.clear_pair_penalties()
